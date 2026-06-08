@@ -43,6 +43,7 @@ class TranscriptRecord:
     stop_reason: str | None = None
     is_meta: bool = False
     is_sidechain: bool = False
+    is_tool_result: bool = False
 
 
 def _parse_usage(raw: object) -> Usage | None:
@@ -55,6 +56,20 @@ def _parse_usage(raw: object) -> Usage | None:
         output_tokens=raw.get("output_tokens"),
         cache_creation_input_tokens=raw.get("cache_creation_input_tokens"),
         cache_read_input_tokens=raw.get("cache_read_input_tokens"),
+    )
+
+
+def _is_tool_result(type_val: str, message: dict) -> bool:
+    """True when a user line's content is/contains a ``tool_result`` block --
+    i.e. the line is NOT a typed prompt. Any non-user line, or a user line whose
+    content is a plain string/other block, is False. Defensive: never raises."""
+    if type_val != "user":
+        return False
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else [content]
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in blocks
     )
 
 
@@ -93,4 +108,5 @@ def parse_line(line: str) -> TranscriptRecord | None:
         stop_reason=message.get("stop_reason"),
         is_meta=bool(obj.get("isMeta", False)),
         is_sidechain=bool(obj.get("isSidechain", False)),
+        is_tool_result=_is_tool_result(type_val, message),
     )
