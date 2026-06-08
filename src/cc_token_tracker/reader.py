@@ -81,7 +81,7 @@ def read_tick(pointer_path: str) -> ReadResult:
         return ReadResult()
 
     records: list[TranscriptRecord] = []
-    for line in content.splitlines():
+    for line in content.split("\n"):
         record = parse_line(line)
         if record is not None:
             records.append(record)

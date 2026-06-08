@@ -101,6 +101,21 @@ class ReaderTick(unittest.TestCase):
         self.assertEqual([r.message_id for r in result.records], [None, "m1"])
         self.assertEqual(result.transcript_path, self.transcript)
 
+    def test_line_with_raw_u2028_is_one_record(self):
+        # pin: a single valid JSONL line whose content carries a raw U+2028
+        # (legal unescaped in a JSON string per RFC 8259, emitted raw by V8's
+        # JSON.stringify) must stay one line. split("\n") keeps it intact;
+        # splitlines() would break it into two fragments that both fail to parse
+        # and the real assistant message would vanish with no error.
+        line = assistant_line("u2028msg", "before\u2028after")
+        self.write(self.transcript, line + "\n")
+        self.set_pointer(self.transcript)
+
+        result = read_tick(self.pointer)
+
+        self.assertEqual(len(result.records), 1)
+        self.assertEqual(result.records[0].message_id, "u2028msg")
+
     def test_session_switch_across_ticks(self):
         # pointer rewritten to a different transcript between ticks: second tick
         # returns only the new file's records, never mixing the two
