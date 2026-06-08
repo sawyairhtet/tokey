@@ -99,6 +99,7 @@ class ValidLines(unittest.TestCase):
                 stop_reason=None,
                 is_meta=False,
                 is_sidechain=False,
+                is_tool_result=True,  # content is a tool_result block
             ),
         )
 
@@ -199,6 +200,38 @@ class MalformedLines(unittest.TestCase):
         # A non-string type (here an int) is malformed.
         type_nonstring = '{"type":42,"message":{"role":"assistant","content":[]}}'
         self.assertIsNone(parse_line(type_nonstring))
+
+
+class ToolResultFlag(unittest.TestCase):
+    """is_tool_result: True for a user tool_result line, False otherwise."""
+
+    def test_is_tool_result_true_when_content_is_tool_result(self):
+        # Present true-case: user line whose content is a tool_result block.
+        line = (
+            '{"type":"user","message":{"role":"user",'
+            '"content":[{"type":"tool_result","tool_use_id":"toolu_01",'
+            '"content":"file contents"}]}}'
+        )
+        rec = parse_line(line)
+        self.assertTrue(rec.is_tool_result)
+
+    def test_is_tool_result_false_for_typed_prompt(self):
+        # Absent default: a real typed prompt (string content) is not a result.
+        line = (
+            '{"type":"user","message":{"role":"user",'
+            '"content":"fix the failing test in auth.py"}}'
+        )
+        rec = parse_line(line)
+        self.assertFalse(rec.is_tool_result)
+
+    def test_is_tool_result_false_for_assistant_line(self):
+        # Non-user lines are never tool_result.
+        line = (
+            '{"type":"assistant","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}'
+        )
+        rec = parse_line(line)
+        self.assertFalse(rec.is_tool_result)
 
 
 if __name__ == "__main__":
