@@ -144,5 +144,40 @@ class RunDefaults(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class RenderPanel(unittest.TestCase):
+    # Render layer only: assert render_panel returns a non-None renderable and
+    # does not raise. Text and styling are cosmetic and deliberately not pinned.
+    def test_completed_delta(self):
+        records = [prompt("p1"), assistant("a1", 100, 50, 7, 3)]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertTrue(frame.delta.complete)
+        self.assertIsNotNone(display.render_panel(frame))
+
+    def test_completed_delta_with_flash(self):
+        records = [prompt("p1"), assistant("a1", 100, 50, 7, 3)]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertIsNotNone(display.render_panel(frame, flash=True))
+
+    def test_in_flight_delta(self):
+        records = [prompt("p1"),
+                   assistant("a1", 10, 5, 0, 0, stop_reason="tool_use")]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertFalse(frame.delta.complete)
+        self.assertIsNotNone(display.render_panel(frame))
+
+    def test_none_delta(self):
+        records = [assistant("a1", 100, 50, 0, 0)]  # no prompt opens a turn
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertIsNone(frame.delta)
+        self.assertIsNotNone(display.render_panel(frame))
+
+    def test_waiting_frame_no_path(self):
+        # None delta and None transcript_path (no subtitle) still renders.
+        frame = display.compute_frame(read_result([], None))
+        self.assertIsNone(frame.delta)
+        self.assertIsNone(frame.transcript_path)
+        self.assertIsNotNone(display.render_panel(frame))
+
+
 if __name__ == "__main__":
     unittest.main()
