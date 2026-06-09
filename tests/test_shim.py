@@ -155,7 +155,7 @@ class RunShim(unittest.TestCase):
 
 class EntryPoint(unittest.TestCase):
     def test_main_is_callable(self):
-        # Pins the console_scripts target (cc-tracker-shim -> shim:main) so the
+        # Pins the console_scripts target (tokey-shim -> shim:main) so the
         # mapping cannot silently point at a missing symbol. We only assert the
         # symbol exists and is callable; we do not invoke it here.
         from cc_token_tracker.shim import main

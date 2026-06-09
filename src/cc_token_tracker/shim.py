@@ -37,7 +37,7 @@ __all__ = [
 DEFAULT_POINTER_PATH = os.path.expanduser("~/.claude/cc_token_tracker/pointer")
 
 # Static fallback so the statusline is never empty, even on garbage stdin.
-_FALLBACK_STATUS = "cc-token-tracker"
+_FALLBACK_STATUS = "tokey"
 
 
 def extract_transcript_path(stdin_text: str) -> str | None:
