@@ -23,20 +23,36 @@ import sys
 import time
 from dataclasses import dataclass
 
+from rich import box
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.reader import ReadResult, read_tick
 from cc_token_tracker.segmentation import segment_turns
 from cc_token_tracker.shim import DEFAULT_POINTER_PATH
 from cc_token_tracker.turn_cost import TurnCost, turn_costs
 
-__all__ = ["Frame", "compute_frame", "DisplayState", "run", "DEFAULT_POINTER_PATH"]
+__all__ = [
+    "Frame",
+    "compute_frame",
+    "DisplayState",
+    "render_panel",
+    "run",
+    "DEFAULT_POINTER_PATH",
+]
 
 _LOG = logging.getLogger(__name__)
 
-# Terminal control for in-place redraw (no scroll spam).
-_HIDE_CURSOR = "\x1b[?25l"
-_SHOW_CURSOR = "\x1b[?25h"
-_CLEAR_LINE = "\x1b[2K"
+# One accent color carries the per-command delta (the differentiator) and its
+# brief flash on a new prompt; everything else stays monochrome. See
+# render_panel. The flash lasts about a second, derived from the poll interval.
+_ACCENT = "cyan"
+_FLASH_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -109,63 +125,157 @@ class DisplayState:
         return frame
 
 
-def _format_frame(frame: Frame) -> str:
-    """Render a frame to a single cosmetic line. Not a tested contract."""
-    name = os.path.basename(frame.transcript_path) if frame.transcript_path else "no session"
-    if frame.delta is None:
-        delta_part = "waiting for first command"
-    else:
-        d = frame.delta
-        in_flight = "" if d.complete else " (in-flight)"
-        delta_part = (
-            "delta in=%d cache_create=%d cache_read=%d out=%d total=%d%s"
-            % (
-                d.input_tokens,
-                d.cache_creation_input_tokens,
-                d.cache_read_input_tokens,
-                d.output_tokens,
-                d.turn_total,
-                in_flight,
-            )
+def _num(value: int) -> str:
+    """Group thousands so the figures stay readable at a glance."""
+    return f"{value:,}"
+
+
+def _figure_grid(columns: list[tuple[str, Text]]) -> Table:
+    """A label-over-value grid: dim labels on top, figures beneath, spread
+    evenly across the panel width."""
+    grid = Table.grid(expand=True, padding=(0, 2))
+    for _ in columns:
+        grid.add_column(justify="center", ratio=1)
+    grid.add_row(*(Text(label, style="dim") for label, _ in columns))
+    grid.add_row(*(value for _, value in columns))
+    return grid
+
+
+def render_panel(frame: Frame, *, flash: bool = False) -> Panel:
+    """Render one Frame to a rich Panel. Pure: Frame in, renderable out.
+
+    No IO, no clock, no global state. The per-command delta is the visual focus
+    and the only thing in the accent color; ``flash`` (decided by the loop, never
+    here) briefly brightens it when a new completed delta lands. IN folds input
+    and cache-creation together; CACHE READ is shown separately. The session row
+    shows only the TOTAL the Frame exposes -- session IN/OUT are not on Frame and
+    are deliberately not recomputed here (that would cross into accounting).
+    """
+    delta = frame.delta
+
+    # LAST PROMPT: the visual focus.
+    last_label = Text("LAST PROMPT", style="bold")
+    if delta is None:
+        last_body: Text | Table = Text(
+            "waiting for first command", style="dim italic"
         )
-    return "%s | session %d | %s" % (delta_part, frame.session_total, name)
+    else:
+        if not delta.complete:
+            last_label.append("  running...", style="dim")
+            value_style = "dim"
+        elif flash:
+            value_style = f"bold reverse {_ACCENT}"
+        else:
+            value_style = f"bold {_ACCENT}"
+        in_tokens = delta.input_tokens + delta.cache_creation_input_tokens
+        last_body = _figure_grid(
+            [
+                ("IN", Text(_num(in_tokens), style=value_style)),
+                ("OUT", Text(_num(delta.output_tokens), style=value_style)),
+                ("CACHE READ",
+                 Text(_num(delta.cache_read_input_tokens), style=value_style)),
+            ]
+        )
+
+    # SESSION TOTAL: only the whole-transcript TOTAL is exposed on Frame.
+    session_body = _figure_grid(
+        [("TOTAL", Text(_num(frame.session_total), style="bold"))]
+    )
+
+    body = Group(
+        last_label,
+        last_body,
+        Rule(style="dim"),
+        Text("SESSION TOTAL", style="bold"),
+        session_body,
+    )
+
+    subtitle = (
+        Text(os.path.basename(frame.transcript_path), style="dim")
+        if frame.transcript_path
+        else None
+    )
+    return Panel(
+        body,
+        title=Text("Token Tracker", style="bold"),
+        subtitle=subtitle,
+        box=box.ROUNDED,
+        padding=(1, 4),
+    )
 
 
-def _render(frame: Frame) -> None:
-    """Redraw the frame in place on stdout."""
-    sys.stdout.write("\r" + _CLEAR_LINE + _format_frame(frame))
-    sys.stdout.flush()
+_UNSET = object()
+
+
+class _FlashState:
+    """Loop-local render state for the new-prompt flash.
+
+    Deliberately NOT part of DisplayState (the tested accounting-hold layer). It
+    remembers the previous tick's delta total and, when a NEW completed delta
+    lands, asks render_panel to flash the LAST PROMPT figures for about a second.
+    """
+
+    def __init__(self, interval: float = 1.0,
+                 flash_seconds: float = _FLASH_SECONDS) -> None:
+        self._prev_total: object = _UNSET
+        self._ticks_left = 0
+        self._flash_ticks = (
+            max(1, round(flash_seconds / interval)) if interval > 0 else 1
+        )
+
+    def observe(self, frame: Frame) -> bool:
+        """Fold one frame and return whether this tick should flash.
+
+        Flash fires when a completed delta's total differs from the previous
+        tick's total. The very first tick never flashes (nothing to compare to),
+        so attaching to an already-running session stays quiet.
+        """
+        delta = frame.delta
+        current = delta.turn_total if delta is not None else None
+        if (
+            delta is not None
+            and delta.complete
+            and self._prev_total is not _UNSET
+            and current != self._prev_total
+        ):
+            self._ticks_left = self._flash_ticks
+        self._prev_total = current
+        flashing = self._ticks_left > 0
+        if self._ticks_left > 0:
+            self._ticks_left -= 1
+        return flashing
 
 
 def run(pointer_path: str | None = None, interval: float = 1.0) -> int:
-    """Poll loop: read_tick, fold, render, sleep. Returns an exit code.
+    """Poll loop: read_tick, fold, render into a rich.Live panel, sleep.
 
     With pointer_path None it defaults to the shim's DEFAULT_POINTER_PATH (the
     same constant the shim writes), so the reader watches the file the shim
-    maintains. A single tick that raises is logged and skipped so one bad read
-    cannot kill a long-running process. KeyboardInterrupt restores the terminal
-    and exits cleanly (0).
+    maintains. The Live context redraws the panel in place each tick -- no
+    per-tick newline. A single tick that raises is logged and skipped so one bad
+    read cannot kill a long-running process. KeyboardInterrupt exits the Live
+    cleanly, leaves the terminal usable, and returns 0.
     """
     if pointer_path is None:
         pointer_path = DEFAULT_POINTER_PATH
 
     state = DisplayState()
-    sys.stdout.write(_HIDE_CURSOR)
-    sys.stdout.flush()
+    flash = _FlashState(interval=interval)
+    console = Console()
     try:
-        while True:
-            try:
-                frame = state.update(read_tick(pointer_path))
-                _render(frame)
-            except Exception:  # noqa: BLE001 - one bad tick must not kill us
-                _LOG.exception("display tick failed; continuing")
-            time.sleep(interval)
+        with Live(console=console, auto_refresh=False, screen=False) as live:
+            while True:
+                try:
+                    frame = state.update(read_tick(pointer_path))
+                    live.update(
+                        render_panel(frame, flash=flash.observe(frame)),
+                        refresh=True,
+                    )
+                except Exception:  # noqa: BLE001 - one bad tick must not kill us
+                    _LOG.exception("display tick failed; continuing")
+                time.sleep(interval)
     except KeyboardInterrupt:
         pass
-    finally:
-        # Restore the terminal: show the cursor and move off the status line.
-        sys.stdout.write(_SHOW_CURSOR + "\n")
-        sys.stdout.flush()
     return 0
 
 
