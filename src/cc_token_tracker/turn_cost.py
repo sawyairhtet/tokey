@@ -48,14 +48,13 @@ def turn_costs(turns: Iterable[Turn]) -> list[TurnCost]:
     results: list[TurnCost] = []
     for turn in turns:
         accounting = account_usage(turn.records)
-        messages = accounting.messages
         results.append(
             TurnCost(
                 complete=turn.complete,
-                input_tokens=sum(m.input_tokens for m in messages),
-                cache_creation_input_tokens=sum(m.cache_creation_input_tokens for m in messages),
-                cache_read_input_tokens=sum(m.cache_read_input_tokens for m in messages),
-                output_tokens=sum(m.output_tokens for m in messages),
+                input_tokens=accounting.total_input_tokens,
+                cache_creation_input_tokens=accounting.total_cache_creation_input_tokens,
+                cache_read_input_tokens=accounting.total_cache_read_input_tokens,
+                output_tokens=accounting.total_output_tokens,
                 turn_total=accounting.session_total,
                 accounting=accounting,
             )

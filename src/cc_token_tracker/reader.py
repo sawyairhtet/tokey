@@ -76,14 +76,15 @@ def read_tick(pointer_path: str) -> ReadResult:
     if transcript_path is None:
         return ReadResult()
 
-    content = _read_text(transcript_path)
-    if content is None:
+    try:
+        with open(transcript_path, "r", encoding="utf-8",
+                  errors="replace") as handle:
+            records: list[TranscriptRecord] = []
+            for line in handle:
+                record = parse_line(line.rstrip("\n"))
+                if record is not None:
+                    records.append(record)
+    except OSError:
         return ReadResult()
-
-    records: list[TranscriptRecord] = []
-    for line in content.split("\n"):
-        record = parse_line(line)
-        if record is not None:
-            records.append(record)
 
     return ReadResult(records=records, transcript_path=transcript_path)

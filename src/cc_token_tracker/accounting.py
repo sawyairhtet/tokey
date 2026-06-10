@@ -43,14 +43,19 @@ class MessageCost:
 
 @dataclass(frozen=True)
 class SessionAccounting:
-    """Per-message breakdown plus the cumulative session total.
+    """Per-message breakdown plus cumulative session totals.
 
     ``session_total`` equals ``messages[-1].session_total`` when there is at
-    least one message, and 0 for empty input.
+    least one message, and 0 for empty input.  The four ``total_*`` fields are
+    the running sums of each component (one pass, no re-iteration needed).
     """
 
     messages: list[MessageCost] = field(default_factory=list)
     session_total: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cache_creation_input_tokens: int = 0
+    total_cache_read_input_tokens: int = 0
 
 
 def _as_int(value: int | None) -> int:
@@ -92,12 +97,20 @@ def account_usage(
 
     messages: list[MessageCost] = []
     running_total = 0
+    total_input = 0
+    total_output = 0
+    total_cache_creation = 0
+    total_cache_read = 0
     for key in order:
         message_id, usage = first_seen[key]
         input_tokens = _as_int(usage.input_tokens)
         cache_creation = _as_int(usage.cache_creation_input_tokens)
         cache_read = _as_int(usage.cache_read_input_tokens)
         output_tokens = _as_int(usage.output_tokens)
+        total_input += input_tokens
+        total_output += output_tokens
+        total_cache_creation += cache_creation
+        total_cache_read += cache_read
         message_total = input_tokens + cache_creation + cache_read + output_tokens
         running_total += message_total
         messages.append(
@@ -112,4 +125,11 @@ def account_usage(
             )
         )
 
-    return SessionAccounting(messages=messages, session_total=running_total)
+    return SessionAccounting(
+        messages=messages,
+        session_total=running_total,
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        total_cache_creation_input_tokens=total_cache_creation,
+        total_cache_read_input_tokens=total_cache_read,
+    )
