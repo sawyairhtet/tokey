@@ -179,6 +179,32 @@ class RenderPanel(unittest.TestCase):
         self.assertIsNotNone(display.render_panel(frame))
 
 
+class FrameRecentShape(unittest.TestCase):
+    # Data-shape only (v0.2 history view): Frame carries a `recent` tuple of
+    # RecentEntry, each wrapping the existing TurnCost. Nothing populates or
+    # renders it yet; these tests pin the shape and its immutable default.
+    def test_recent_defaults_to_empty(self):
+        frame = display.compute_frame(
+            read_result([prompt("p1"), assistant("a1", 100, 50, 0, 0)],
+                        "/x/t.jsonl"))
+        self.assertEqual(frame.recent, ())
+
+    def test_recent_carries_entry_wrapping_turncost(self):
+        # Build a real TurnCost via the pipeline, wrap it in a RecentEntry, and
+        # confirm both the snippet text and the wrapped cost survive on Frame.
+        records = [prompt("p1"), assistant("a1", 100, 50, 7, 3)]
+        cost = display.compute_frame(read_result(records, "/x/t.jsonl")).delta
+        self.assertIsNotNone(cost)
+
+        entry = display.RecentEntry(cost=cost, text="hi")
+        frame = display.Frame(delta=None, session_total=0,
+                              transcript_path=None, recent=(entry,))
+
+        self.assertEqual(frame.recent[0].text, "hi")
+        self.assertIs(frame.recent[0].cost, cost)
+        self.assertEqual(frame.recent[0].cost.turn_total, cost.turn_total)
+
+
 class EntryPoint(unittest.TestCase):
     def test_main_is_callable(self):
         # Pins the console_scripts target (tokey -> display:main) so the
