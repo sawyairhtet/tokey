@@ -413,6 +413,46 @@ class RenderRecent(unittest.TestCase):
         self.assertIn("11", out)           # cost figure (10+1) still visible
 
 
+class RenderOmitted(unittest.TestCase):
+    """Render layer for the '+N more' overflow line. The count is read straight
+    off frame.recent_omitted -- the renderer does no counting. Structure only
+    (line present/absent and its text), never pixels."""
+
+    @staticmethod
+    def _text(frame, width=80):
+        console = Console(width=width)
+        with console.capture() as cap:
+            console.print(display.render_panel(frame))
+        return cap.get()
+
+    def _frame(self, *, omitted, with_recent=True):
+        # A coherent frame built through the pipeline (real TurnCost), with the
+        # overflow count set directly so we exercise the renderer in isolation.
+        records = [prompt("p1"), assistant("a1", 100, 50, 7, 3)]
+        cost = display.compute_frame(read_result(records, "/x/t.jsonl")).delta
+        recent = ((display.RecentEntry(cost=cost, text="alpha snippet"),)
+                  if with_recent else ())
+        return display.Frame(delta=cost, session_total=999,
+                             transcript_path="/x/t.jsonl",
+                             recent=recent, recent_omitted=omitted)
+
+    def test_positive_count_renders_plus_n_more(self):
+        out = self._text(self._frame(omitted=12))
+        self.assertIn("+12 more", out)
+
+    def test_zero_count_renders_no_line(self):
+        # No overflow line at all when the count is 0 (snippet has no 'more').
+        out = self._text(self._frame(omitted=0))
+        self.assertNotIn("more", out)
+
+    def test_empty_recent_has_no_line_even_if_count_set(self):
+        # By construction the line is gated on the RECENT section existing: a
+        # frame with no recent rows shows nothing, proving the gate not the count.
+        out = self._text(self._frame(omitted=12, with_recent=False))
+        self.assertNotIn("+12 more", out)
+        self.assertNotIn("RECENT", out)
+
+
 class RenderWidthCap(unittest.TestCase):
     """Panel width cap: render_panel(width=W) renders at exactly W regardless of
     a wider console, and snippet truncation measures against the panel, not the

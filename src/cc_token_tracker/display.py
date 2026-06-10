@@ -323,14 +323,20 @@ def render_panel(
     # SESSION TOTAL: only the whole-transcript TOTAL is exposed on Frame.
     session_body = _total_row(frame.session_total)
 
-    # hero -> divider -> [RECENT -> divider] -> SESSION TOTAL. The RECENT block
-    # appears ONLY when frame.recent is non-empty; with no recent entries the
-    # group is byte-identical to the v0.1 hero+total layout (no empty box, no
-    # placeholder). recent is rendered exactly as compute_frame supplied it.
+    # hero -> divider -> [RECENT (-> "+N more") -> divider] -> SESSION TOTAL. The
+    # RECENT block appears ONLY when frame.recent is non-empty; with no recent
+    # entries the group is byte-identical to the v0.1 hero+total layout (no empty
+    # box, no placeholder). recent is rendered exactly as compute_frame supplied
+    # it. The "+N more" overflow line sits at the bottom of the RECENT section
+    # (after the rows, before the divider) and reads frame.recent_omitted as-is --
+    # the renderer never recomputes the count. It is omitted when the count is 0,
+    # and absent entirely when there is no RECENT section.
     items: list = [last_label, last_body, Rule(style="dim")]
     if frame.recent:
         items.append(Text("RECENT", style="bold"))
         items.append(_recent_rows(frame.recent))
+        if frame.recent_omitted:
+            items.append(Text(f"+{frame.recent_omitted} more", style="dim"))
         items.append(Rule(style="dim"))
     items.append(Text("SESSION TOTAL", style="bold"))
     items.append(session_body)
