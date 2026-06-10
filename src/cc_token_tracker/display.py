@@ -33,7 +33,7 @@ from rich.text import Text
 
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.reader import ReadResult, read_tick
-from cc_token_tracker.segmentation import segment_turns
+from cc_token_tracker.segmentation import Turn, segment_turns
 from cc_token_tracker.shim import DEFAULT_POINTER_PATH
 from cc_token_tracker.turn_cost import TurnCost, turn_costs
 
@@ -55,6 +55,10 @@ _LOG = logging.getLogger(__name__)
 # render_panel. The flash lasts about a second, derived from the poll interval.
 _ACCENT = "cyan"
 _FLASH_SECONDS = 1.0
+
+# The history view keeps at most this many past turns behind the hero. One knob,
+# easy to retune later; the renderer (a later ticket) decides how many it shows.
+RECENT_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -102,13 +106,47 @@ def compute_frame(result: ReadResult) -> Frame:
     rather than an error.
     """
     session_total = account_usage(result.records).session_total
-    costs = turn_costs(segment_turns(result.records))
+    turns = segment_turns(result.records)
+    costs = turn_costs(turns)
     delta = costs[-1] if costs else None
     return Frame(
         delta=delta,
         session_total=session_total,
         transcript_path=result.transcript_path,
+        recent=_recent_entries(turns, costs),
     )
+
+
+def _prompt_snippet(turn: Turn) -> str:
+    """The turn's typed-prompt text, whitespace-collapsed; '' when absent.
+
+    The opening record of a turn is the typed-prompt record segment_turns
+    already selected, so we read its retained ``text`` directly and never
+    re-derive which record that is. The full text is kept (no truncation -- that
+    is the renderer's job); only runs of whitespace/newlines collapse to single
+    spaces.
+    """
+    raw = turn.records[0].text if turn.records else None
+    return " ".join(raw.split()) if raw else ""
+
+
+def _recent_entries(
+    turns: list[Turn], costs: list[TurnCost]
+) -> tuple[RecentEntry, ...]:
+    """The history view's backing tuple: completed turns BEHIND the hero.
+
+    The hero is the newest COMPLETED turn (the per-command focus); ``recent`` is
+    the completed turns behind it, newest-first, capped at ``RECENT_LIMIT``. An
+    in-flight trailing turn is not completed, so it is neither the hero nor a
+    recent entry. Costs come straight from ``turn_costs`` (reused, never
+    recomputed by hand); ``costs`` is aligned 1:1 with ``turns``.
+    """
+    completed = [(turn, cost) for turn, cost in zip(turns, costs) if turn.complete]
+    behind_hero = completed[:-1]  # drop the newest completed turn (the hero)
+    return tuple(
+        RecentEntry(cost=cost, text=_prompt_snippet(turn))
+        for turn, cost in reversed(behind_hero)
+    )[:RECENT_LIMIT]
 
 
 class DisplayState:
