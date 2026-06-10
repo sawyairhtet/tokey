@@ -16,10 +16,18 @@ from cc_token_tracker import display
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.parser import TranscriptRecord, Usage
 from cc_token_tracker.reader import ReadResult
+from cc_token_tracker.segmentation import segment_turns
+from cc_token_tracker.turn_cost import turn_costs
 
 
 def prompt(mid):
     return TranscriptRecord(type="user", message_id=mid, role="user")
+
+
+def typed(mid, text):
+    # A typed user prompt that opens a turn AND carries its raw text, exactly as
+    # parse_line now retains string message.content.
+    return TranscriptRecord(type="user", message_id=mid, role="user", text=text)
 
 
 def assistant(mid, input_tokens, output_tokens, cache_creation, cache_read,
@@ -203,6 +211,82 @@ class FrameRecentShape(unittest.TestCase):
         self.assertEqual(frame.recent[0].text, "hi")
         self.assertIs(frame.recent[0].cost, cost)
         self.assertEqual(frame.recent[0].cost.turn_total, cost.turn_total)
+
+
+class RecentPopulation(unittest.TestCase):
+    """compute_frame populates Frame.recent: completed turns behind the hero,
+    newest-first, capped, each carrying that turn's TurnCost and snippet."""
+
+    # Distinct per-turn costs (turn_total differs each turn) and distinct texts,
+    # so a wrong slice or off-by-one cannot accidentally pass. Token n*10/n gives
+    # turn_total 11, 22, 33, 44 for the four completed turns. The trailing turn
+    # is in-flight (no end_turn).
+    def _records(self):
+        return [
+            typed("p1", "alpha one"), assistant("a1", 10, 1, 0, 0),
+            typed("p2", "  beta\n\ttwo   three  "), assistant("a2", 20, 2, 0, 0),
+            typed("p3", "gamma"), assistant("a3", 30, 3, 0, 0),
+            typed("p4", "delta four"), assistant("a4", 40, 4, 0, 0),   # HERO
+            typed("p5", "echo running"),
+            assistant("a5", 5, 0, 0, 0, stop_reason="tool_use"),       # in-flight
+        ]
+
+    def test_hero_excluded_and_newest_first(self):
+        frame = display.compute_frame(read_result(self._records(), "/x/t.jsonl"))
+        texts = [e.text for e in frame.recent]
+
+        # Hero (newest completed, "delta four") is NOT in recent; in-flight
+        # trailing turn ("echo running") is not in recent either.
+        self.assertNotIn("delta four", texts)
+        self.assertNotIn("echo running", texts)
+        # Completed turns behind the hero, newest-first. Note "beta two three"
+        # proves whitespace/newlines collapsed to single spaces.
+        self.assertEqual(texts, ["gamma", "beta two three", "alpha one"])
+
+    def test_in_flight_is_the_delta_not_a_recent_entry(self):
+        # The trailing in-flight turn is the delta (costs[-1]) and stays incomplete;
+        # recent is computed independently off the newest COMPLETED hero.
+        frame = display.compute_frame(read_result(self._records(), "/x/t.jsonl"))
+        self.assertIsNotNone(frame.delta)
+        self.assertFalse(frame.delta.complete)
+        self.assertEqual(len(frame.recent), 3)  # T3, T2, T1
+
+    def test_cost_equals_turn_costs_for_that_turn(self):
+        # Each entry's cost equals the pipeline's TurnCost for that turn (reused,
+        # not a hand-recomputed number). costs index: T1=0, T2=1, T3=2.
+        records = self._records()
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        costs = turn_costs(segment_turns(records))
+
+        self.assertEqual(frame.recent[0].cost, costs[2])  # gamma  -> turn_total 33
+        self.assertEqual(frame.recent[1].cost, costs[1])  # beta   -> turn_total 22
+        self.assertEqual(frame.recent[2].cost, costs[0])  # alpha  -> turn_total 11
+        self.assertEqual(
+            [e.cost.turn_total for e in frame.recent], [33, 22, 11]
+        )
+
+    def test_capped_at_recent_limit_newest_first(self):
+        # More completed turns than the cap: keep exactly RECENT_LIMIT, the
+        # newest behind the hero, newest-first. Build 7 completed turns -> hero
+        # is turn 7; recent must be turns 6,5,4,3,2 (5 of them), turn 1 dropped.
+        records = []
+        for i in range(1, 8):  # 7 completed turns
+            records += [typed(f"p{i}", f"turn {i}"),
+                        assistant(f"a{i}", i, 0, 0, 0)]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+
+        self.assertEqual(len(frame.recent), display.RECENT_LIMIT)
+        self.assertEqual(display.RECENT_LIMIT, 5)
+        self.assertEqual(
+            [e.text for e in frame.recent],
+            ["turn 6", "turn 5", "turn 4", "turn 3", "turn 2"],
+        )
+
+    def test_fewer_than_two_completed_turns_is_empty(self):
+        # One completed turn = hero only, nothing behind it.
+        records = [typed("p1", "solo"), assistant("a1", 10, 1, 0, 0)]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertEqual(frame.recent, ())
 
 
 class EntryPoint(unittest.TestCase):
