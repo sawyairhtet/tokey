@@ -39,6 +39,7 @@ from cc_token_tracker.turn_cost import TurnCost, turn_costs
 
 __all__ = [
     "Frame",
+    "RecentEntry",
     "compute_frame",
     "DisplayState",
     "render_panel",
@@ -57,18 +58,33 @@ _FLASH_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
+class RecentEntry:
+    """One row of the v0.2 history view: a past turn's cost plus its prompt.
+
+    cost reuses the existing TurnCost wholesale (do not copy out IN/OUT/CACHE
+    fields). text is the typed-prompt snippet, populated in a later ticket; it
+    defaults to empty so this commit only widens the shape.
+    """
+
+    cost: TurnCost
+    text: str = ""
+
+
+@dataclass(frozen=True)
 class Frame:
     """One render's worth of state.
 
     delta is the most-recent turn's TurnCost (the per-command number) or None
     when the transcript has no turns yet. session_total is the transcript-wide
     total from account_usage. transcript_path is the transcript this frame
-    describes, or None for the initial waiting frame.
+    describes, or None for the initial waiting frame. recent is the history
+    view's backing tuple; it stays empty in this commit (no populate, no render).
     """
 
     delta: TurnCost | None
     session_total: int
     transcript_path: str | None
+    recent: tuple[RecentEntry, ...] = ()
 
 
 # The frame shown before any real transcript has been seen, and the frame a
