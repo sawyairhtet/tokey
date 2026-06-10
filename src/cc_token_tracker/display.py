@@ -60,6 +60,11 @@ _FLASH_SECONDS = 1.0
 # easy to retune later; the renderer (a later ticket) decides how many it shows.
 RECENT_LIMIT = 5
 
+# Upper bound on the rendered panel width. On a narrow terminal the panel uses
+# the full width; on a wide one it caps here instead of stretching edge to edge.
+# One knob, easy to tune. The impure console-width read lives in run, not here.
+MAX_PANEL_WIDTH = 100
+
 
 @dataclass(frozen=True)
 class RecentEntry:
@@ -220,7 +225,9 @@ def _recent_rows(recent: tuple[RecentEntry, ...]) -> Table:
     return grid
 
 
-def render_panel(frame: Frame, *, flash: bool = False) -> Panel:
+def render_panel(
+    frame: Frame, *, flash: bool = False, width: int | None = None
+) -> Panel:
     """Render one Frame to a rich Panel. Pure: Frame in, renderable out.
 
     No IO, no clock, no global state. The per-command delta is the visual focus
@@ -229,6 +236,12 @@ def render_panel(frame: Frame, *, flash: bool = False) -> Panel:
     and cache-creation together; CACHE READ is shown separately. The session row
     shows only the TOTAL the Frame exposes -- session IN/OUT are not on Frame and
     are deliberately not recomputed here (that would cross into accounting).
+
+    ``width`` bounds the panel: when given (run passes the capped target width),
+    the Panel renders at exactly that width and its inner content -- including the
+    snippet truncation -- measures against it. When None the panel expands to fill
+    its container as before. render_panel never reads the console itself; the
+    width is handed in so this stays pure.
     """
     delta = frame.delta
 
@@ -285,6 +298,7 @@ def render_panel(frame: Frame, *, flash: bool = False) -> Panel:
         subtitle=subtitle,
         box=box.ROUNDED,
         padding=(1, 4),
+        width=width,
     )
 
 
@@ -351,8 +365,14 @@ def run(pointer_path: str | None = None, interval: float = 1.0) -> int:
             while True:
                 try:
                     frame = state.update(read_tick(pointer_path))
+                    # Impure console-width read lives here (run owns the console).
+                    # Cap responsively: full width when narrow, MAX_PANEL_WIDTH
+                    # when wide. render_panel stays pure -- it just gets the number.
+                    target_width = min(console.width, MAX_PANEL_WIDTH)
                     live.update(
-                        render_panel(frame, flash=flash.observe(frame)),
+                        render_panel(
+                            frame, flash=flash.observe(frame), width=target_width
+                        ),
                         refresh=True,
                     )
                 except Exception:  # noqa: BLE001 - one bad tick must not kill us

@@ -359,6 +359,57 @@ class RenderRecent(unittest.TestCase):
         self.assertIn("11", out)           # cost figure (10+1) still visible
 
 
+class RenderWidthCap(unittest.TestCase):
+    """Panel width cap: render_panel(width=W) renders at exactly W regardless of
+    a wider console, and snippet truncation measures against the panel, not the
+    terminal. Structure (line widths / ellipsis), never pixels."""
+
+    @staticmethod
+    def _capture(frame, *, panel_width, console_width):
+        console = Console(width=console_width)
+        with console.capture() as cap:
+            console.print(display.render_panel(frame, width=panel_width))
+        return cap.get()
+
+    def test_capped_width_does_not_stretch_to_console(self):
+        # Console is 200 wide; the panel asked for 80 must render at 80, not 200.
+        records = [
+            typed("p1", "alpha"), assistant("a1", 10, 1, 0, 0),
+            typed("p2", "bravo"), assistant("a2", 20, 2, 0, 0),
+            typed("p3", "hero"), assistant("a3", 30, 3, 0, 0),
+        ]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        out = self._capture(frame, panel_width=80, console_width=200)
+
+        widths = [len(ln.rstrip()) for ln in out.splitlines() if ln.strip()]
+        self.assertEqual(max(widths), 80)  # bounded by the panel, not the console
+        self.assertIn("Tokey", out)        # still a real, populated panel
+        self.assertIn("RECENT", out)
+
+    def test_truncation_measures_against_panel_not_console(self):
+        # A long snippet on a WIDE console but a NARROW panel must ellipsize at
+        # the panel edge -- proves truncation composes with the cap, no hardcoded
+        # char count.
+        long = "x" * 300
+        records = [
+            typed("p1", long), assistant("a1", 10, 1, 0, 0),
+            typed("p2", "hero"), assistant("a2", 20, 2, 0, 0),
+        ]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        out = self._capture(frame, panel_width=40, console_width=200)
+
+        widths = [len(ln.rstrip()) for ln in out.splitlines() if ln.strip()]
+        self.assertEqual(max(widths), 40)  # capped at the panel, not 200
+        self.assertIn("…", out)            # truncated at the panel edge
+        self.assertNotIn(long, out)
+
+    def test_width_none_still_renders(self):
+        # The default (no width) path is unchanged: expands to fill, still renders.
+        records = [typed("p1", "solo"), assistant("a1", 10, 1, 0, 0)]
+        frame = display.compute_frame(read_result(records, "/x/t.jsonl"))
+        self.assertIsNotNone(display.render_panel(frame))
+
+
 class EntryPoint(unittest.TestCase):
     def test_main_is_callable(self):
         # Pins the console_scripts target (tokey -> display:main) so the
