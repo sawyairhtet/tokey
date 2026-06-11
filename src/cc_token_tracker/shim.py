@@ -153,9 +153,17 @@ def main() -> int:
     returns 0.
     """
     try:
-        text = sys.stdin.read()
+        text = sys.stdin.buffer.read().decode("utf-8")
         print(run_shim(text, DEFAULT_POINTER_PATH))
-    except Exception:
+    except Exception as e:
+        try:
+            log_dir = os.path.dirname(DEFAULT_POINTER_PATH)
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "shim_error.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{type(e).__name__}: {e}\n")
+        except Exception:
+            pass
         print(_FALLBACK_STATUS)
     return 0
 
