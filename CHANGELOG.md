@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [0.6.0] - 2026-06-13
+
+The all-expanded multi-session panel.
+
+### Added
+- **Liveness scope**: each session is classified active / closing / dropped
+  from its transcript mtime. Dropped sessions leave the roster; the header
+  counts the active ones only (`N active sessions · [1.0s]`); closing sessions
+  stay visible but uncounted.
+- **All-expanded blocks**: every live session now renders as its own compact
+  block instead of a collapsed row: project name and liveness label, a one-line
+  context gauge (`NN% ·· bar · ~Nk left`), and a `Last:` line for its most
+  recent completed turn (IN folding cache creation, OUT, CACHE shown only when
+  the turn read cache, and the turn's dollar cost). Blocks stack, so a
+  newly-started session appears within one refresh with no restart. The `▶`
+  marks the auto-followed (newest) session.
+
+### Changed
+- **Footer is active-only**: the footer now shows `active: $X.XXX · N.Nk tok`
+  over the active sessions only (the same scope as the header count), with a
+  right-aligned `(+ unpriced)` flag. The all-discovered lifetime total and the
+  session count were dropped (the header already states how many are active).
+- The roster is now summary-driven and no longer depends on the live frame, so
+  each block shows its session's last COMPLETED turn (stable); the panel no
+  longer flashes or shows `running...` for an in-flight prompt.
+
+### Removed
+- **RECENT strip**: the recent-prompts list (and its on-screen typed-prompt
+  snippets) is gone product-wide. The data is still computed; the roster simply
+  no longer renders it.
+
 ## [0.5.0] - 2026-06-12
 
 The multi-session roster.

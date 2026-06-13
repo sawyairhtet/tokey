@@ -9,38 +9,37 @@ number is the thing I kept wanting to see.
 
 Claude Code's built-in statusline shows how full your context window is. It does
 not show what the prompt you just sent actually cost. This shows that, for every
-recent session at once.
+live session at once.
 
-The view is a roster: one row per Claude Code session from the last 7 days,
-newest first, with PROJECT, TOTAL TOK, COST, CONTEXT, and LAST (how long ago
-the session last wrote, or `active`). With more than 10 sessions the newest 10
-render and a "+N more" line counts the rest. A footer sums everything: session
-count on the left, all-sessions dollar and token totals on the right, marked
-"(+ unpriced)" whenever any session contains turns that could not be priced.
+The view is a roster: one compact block per Claude Code session from the last 7
+days, newest first. Every block stacks the same shape, so a newly-started
+session just adds another block within a refresh (no restart). Each block is:
 
-The active session is marked ▶ and auto-expands inline with:
+- a **header line**: the project name and the session's liveness (`active`, or
+  `closing` as it winds down), with `▶` marking the session tokey is
+  auto-following (the most recently active one).
+- **Context**: `NN% ·· bar · ~Nk left`, an estimate of how full the window is,
+  derived from the last prompt's token figures (input plus cache read plus
+  cache creation). Treat it as a gauge rather than an exact meter; an estimate
+  that overflows the window renders like `104%?` instead of clamping to a clean
+  100%, and a model the limit table does not know shows `context limit unknown`.
+- **Last**: the session's most recent completed turn, broken into IN (input
+  plus cache creation), OUT, CACHE (cache read, shown only when the turn read
+  cache), and the turn's dollar cost. An unpriceable model shows `$?`; a session
+  that has not finished a turn yet shows `no completed turn yet`.
 
-- **Context**: used / limit tokens, a bar, and `NN% · ~Nk left`. The percent
-  is an estimate derived from the last prompt's token figures (input plus
-  cache read plus cache creation), so treat it as a gauge rather than an
-  exact meter; an estimate that overflows the window renders like `104%?`
-  instead of clamping to a clean 100%.
-- **Last prompt**: the most recent turn, broken into IN (input plus cache
-  creation), OUT, CACHE READ, and COST (the turn's dollar figure).
-- **Recent**: the prompts behind it, newest first (the last prompt itself
-  excluded), each shown with its dollar cost, a short model tag (`fab5`,
-  `op4.8`, `sn4.6`, `hk4.5`), and a snippet of the text you typed. When more
-  have scrolled past than fit, a dim "+N more" line says how many are hidden.
+With more than 10 live sessions the newest 10 render and a "+N more" line counts
+the rest. A footer shows the active total, `active: $X · Nk tok`, summed over the
+sessions currently active (the same scope as the header's active count); a
+`(+ unpriced)` flag appears whenever any of them contains turns that could not
+be priced.
 
 Each turn is priced with its own model before summing, so sessions that mix
-models add up correctly. With a single session the roster is simply that row
-expanded plus the footer.
+models add up correctly.
 
-The per-prompt delta is the one I watch: it tells me which prompts are expensive
-while I can still change how I am asking, instead of finding out at the end.
-
-One privacy note: the Recent list prints a snippet of your typed prompt text on
-screen, so it is visible to anyone who can see that terminal pane.
+The per-prompt Last figure is the one I watch: it tells me which prompts are
+expensive while I can still change how I am asking, instead of finding out at
+the end.
 
 ## Requirements
 
@@ -104,8 +103,9 @@ Press Ctrl-C to quit the panel.
 
 - The tracker reads Claude Code's transcript files; it never scrapes your
   terminal and sends nothing anywhere. It runs entirely on your machine.
-- It follows you across projects automatically. Start a new Claude Code session
-  in any folder and the panel switches to it.
+- It shows every live session at once and follows you across projects
+  automatically. Start a new Claude Code session in any folder and it appears as
+  a new block within a refresh, auto-followed (▶) as the newest.
 
 A couple of things to know about the dollar figures: they are computed from a
 built-in rate table (API list prices as of 2026-06-12), so treat them as close
@@ -122,5 +122,6 @@ table does not know shows `?` for context rather than a guessed limit, and an
 estimate that exceeds the documented window keeps its number with a trailing
 `?` (like `104%?`) instead of pretending to be full.
 
-The panel reflects the transcript on disk, so a brand-new session shows nothing
-until its first prompt completes.
+The panel reflects the transcript on disk: a brand-new session appears as a
+block as soon as its transcript exists, showing `no completed turn yet` until
+its first prompt completes.
