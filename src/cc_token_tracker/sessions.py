@@ -41,6 +41,7 @@ import os
 import time
 from dataclasses import dataclass, replace
 
+from cc_token_tracker import liveness
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.context import estimate_context
 from cc_token_tracker.display import _session_cost
@@ -94,6 +95,15 @@ class SessionSummary:
     ``context_percent`` may exceed 100. ``last_write`` is the transcript's
     mtime when summarized. ``is_active`` marks the single most recently
     modified transcript of a discovery pass.
+
+    ``state`` is an additive, presentation-only liveness label
+    (active/closing/dropped from
+    :func:`cc_token_tracker.liveness.classify_liveness`). It is NOT frozen here
+    at parse time -- liveness drifts with the wall clock while a summary may be
+    served unchanged from cache, so the panel assembly recomputes it each
+    render from ``last_write`` against the current ``now`` (see
+    :func:`cc_token_tracker.roster.build_roster_view`). The default is a
+    placeholder the render pass always overwrites.
     """
 
     project: str
@@ -106,6 +116,7 @@ class SessionSummary:
     context_percent: float | None
     last_write: float
     is_active: bool
+    state: str = liveness.ACTIVE
 
 
 def discover_sessions(

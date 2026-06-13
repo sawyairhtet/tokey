@@ -19,6 +19,7 @@ from cc_token_tracker.display import Frame, RecentEntry
 from cc_token_tracker.roster import (
     ROSTER_LIMIT,
     age_figure,
+    build_roster_view,
     cost_figure,
     percent_figure,
     render_roster,
@@ -226,11 +227,13 @@ class FooterAndCaps(unittest.TestCase):
         self.assertNotIn("1 sessions", text)
 
     def test_more_than_ten_sessions_cap_with_more_line(self):
+        # Spacing kept under the 600s active window (index*30, max 360s) so this
+        # stays a pure cap test, independent of the liveness boundaries.
         summaries = [
             make_summary(project=f"proj-{index:02d}",
                          file_name=f"s{index:02d}.jsonl",
                          is_active=(index == 0),
-                         last_write=NOW - index * 60,
+                         last_write=NOW - index * 30,
                          total_tokens=10_000, total_cost_usd=0.1)
             for index in range(13)
         ]
@@ -243,6 +246,35 @@ class FooterAndCaps(unittest.TestCase):
         # Footer still covers ALL sessions, hidden rows included.
         self.assertIn("13 sessions", text)
         self.assertIn("0.13M tok", text)
+
+    def test_dropped_session_excluded_from_cap_overflow(self):
+        # 11 fresh/active sessions inside the 600s window plus one stale session
+        # aged past the 720s dropped boundary: 12 discovered. The dropped one is
+        # absent from the roster but still counted in the footer total.
+        fresh = [
+            make_summary(project=f"proj-{index:02d}",
+                         file_name=f"s{index:02d}.jsonl",
+                         is_active=(index == 0),
+                         last_write=NOW - index * 30,
+                         total_tokens=10_000, total_cost_usd=0.1)
+            for index in range(11)
+        ]
+        dropped = make_summary(project="proj-dropped", file_name="dropped.jsonl",
+                               last_write=NOW - 800,
+                               total_tokens=50_000, total_cost_usd=0.5)
+        summaries = fresh + [dropped]
+
+        # Roster scope: the dropped session leaves; 11 remain, 10 shown.
+        view = build_roster_view(summaries, now=NOW)
+        self.assertEqual(len(view.sessions), 11)
+
+        text = render_text(summaries, make_frame())
+        self.assertIn("+1 more", text)           # 11 roster rows, 10 shown
+        self.assertNotIn("proj-dropped", text)   # dropped row is gone
+        # Footer still covers all 12 discovered, the dropped session included:
+        # 11*0.1 + 0.5 = $1.60, 11*10k + 50k = 0.16M tok.
+        self.assertIn("12 sessions", text)
+        self.assertIn("all: $1.60 · 0.16M tok", text)
 
     def test_empty_roster(self):
         text = render_text([], WAITING_FRAME)

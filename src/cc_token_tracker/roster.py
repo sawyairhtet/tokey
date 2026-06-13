@@ -9,6 +9,12 @@ is render-only, and the active row follows recency exactly like the v0.3+
 auto-follow (the newest transcript is the active one, so it is always the top
 row).
 
+Liveness scope (v0.6.0): each row carries an active/closing/dropped label from
+its transcript mtime (:mod:`cc_token_tracker.liveness`). Dropped sessions leave
+the roster; the header counts the live ("active") ones only; closing sessions
+stay visible but uncounted. The footer's all-sessions totals are unaffected and
+still cover every discovered session.
+
 Honesty markers carried into every cell:
 - COST: ``$?`` when nothing in the session could be priced; a trailing ``?``
   (``$1.23?``) when the figure is partial because some turn went unpriced.
@@ -23,6 +29,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from dataclasses import dataclass, replace
 
 from rich import box
 from rich.console import Console, Group
@@ -45,10 +52,13 @@ from cc_token_tracker.display import (
     _read_for_tick,
     _recent_rows,
 )
+from cc_token_tracker.liveness import ACTIVE, DROPPED, classify_liveness
 from cc_token_tracker.sessions import SessionCache, SessionSummary
 
 __all__ = [
     "ROSTER_LIMIT",
+    "RosterView",
+    "build_roster_view",
     "percent_figure",
     "cost_figure",
     "age_figure",
@@ -74,6 +84,57 @@ _COL_TOTAL_TOK = 11
 _COL_COST = 9
 _COL_CONTEXT = 8
 _COL_LAST = 8
+
+
+@dataclass(frozen=True)
+class RosterView:
+    """One render pass's presentation scope over the session summaries.
+
+    ``sessions`` is the on-screen roster: every summary whose liveness is not
+    "dropped" (so active + closing), newest first, each carrying its freshly
+    computed ``state``. ``active_count`` counts the "active" ones ONLY --
+    closing sessions stay on screen as rows but are never counted. Dropped
+    sessions are absent from ``sessions`` entirely. This is presentation, not
+    accounting: the cost and token figures inside each summary are reused
+    verbatim, never recomputed here.
+    """
+
+    sessions: list[SessionSummary]
+    active_count: int
+
+
+def build_roster_view(
+    summaries: list[SessionSummary], *, now: float
+) -> RosterView:
+    """Stamp liveness onto ``summaries`` and derive the panel's roster scope.
+
+    Each summary is re-stamped with ``state = classify_liveness(now,
+    last_write)`` (the field is presentation-only; see
+    :class:`cc_token_tracker.sessions.SessionSummary`). The roster keeps the
+    non-dropped ones in the given order; the active count is the number of
+    "active" survivors. Pure given ``now``: no IO, no re-parsing, no touching
+    of the frozen cost outputs.
+    """
+    staged = [
+        replace(summary, state=classify_liveness(now, summary.last_write))
+        for summary in summaries
+    ]
+    sessions = [summary for summary in staged if summary.state != DROPPED]
+    active_count = sum(1 for summary in sessions if summary.state == ACTIVE)
+    return RosterView(sessions=sessions, active_count=active_count)
+
+
+def _active_header(active_count: int) -> Text:
+    """Top line: how many sessions are live right now -- "active" only.
+
+    Closing sessions render as rows below but are deliberately left out of this
+    figure; dropped sessions are gone from the roster entirely. Presentation
+    only: this count never touches the footer's cost/token totals.
+    """
+    return Text.assemble(
+        (str(active_count), f"bold {_ACCENT}"),
+        (" active", "dim"),
+    )
 
 
 def percent_figure(percent: float | None) -> str:
@@ -305,23 +366,30 @@ def render_roster(
 
     ``summaries`` is the session-cache output, newest first, the active entry
     flagged; ``frame`` is the live-path Frame whose hero/RECENT content fills
-    the active row's expansion. Rows beyond ROSTER_LIMIT collapse into a
-    "+N more" line above the footer; footer totals still cover all of them.
-    ``now`` feeds the humanized LAST column (defaults to the current time;
-    tests pin it). No input handling and no key hints exist in this view.
+    the active row's expansion. Liveness scope is applied here (see
+    :func:`build_roster_view`): dropped sessions leave the roster, the header
+    counts only the live ("active") ones, and closing sessions stay visible but
+    uncounted. Rows beyond ROSTER_LIMIT collapse into a "+N more" line above
+    the footer; the footer totals still cover EVERY discovered session,
+    dropped and capped ones included. ``now`` drives both the liveness scope
+    and the humanized LAST column (defaults to the current time; tests pin it).
+    No input handling and no key hints exist in this view.
     """
     if now is None:
         now = time.time()
 
-    items: list = []
-    if summaries:
+    view = build_roster_view(summaries, now=now)
+    roster = view.sessions
+
+    items: list = [_active_header(view.active_count)]
+    if roster:
         items.append(_header_row())
-        shown = summaries[:ROSTER_LIMIT]
+        shown = roster[:ROSTER_LIMIT]
         for summary in shown:
             items.append(_session_row(summary, now=now))
             if summary.is_active:
                 items.append(_expanded_block(summary, frame, flash=flash))
-        omitted = len(summaries) - len(shown)
+        omitted = len(roster) - len(shown)
         if omitted > 0:
             items.append(Text(f"+{omitted} more", style="dim"))
     else:
@@ -330,7 +398,7 @@ def render_roster(
     items.append(Rule(style="dim"))
     items.append(_footer(summaries))
 
-    active = next((s for s in summaries if s.is_active), None)
+    active = next((s for s in roster if s.is_active), None)
     subtitle = Text(active.file_name, style="dim") if active else None
     return Panel(
         Group(*items),
