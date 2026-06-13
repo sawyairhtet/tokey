@@ -249,6 +249,55 @@ class SummarizeSession(SessionsBase):
         os.remove(path)
         self.assertIsNone(summarize_session(path))
 
+    def test_last_turn_figures_fold_cache_creation_and_carry_cache_read(self):
+        # The v0.6 roster block's "Last:" line: IN folds cache-creation into
+        # input, CACHE is the read, OUT is output, priced via the frozen table.
+        asst = json.dumps({"type": "assistant", "message": {
+            "id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "end_turn", "model": OPUS,
+            "usage": {"input_tokens": 1000, "output_tokens": 500,
+                      "cache_creation_input_tokens": 300,
+                      "cache_read_input_tokens": 4000}}})
+        path = self.write_transcript("proj-a", "s1.jsonl", [PROMPT, asst])
+
+        summary = summarize_session(path)
+
+        self.assertEqual(summary.last_input_tokens, 1300)  # 1000 + 300 creation
+        self.assertEqual(summary.last_output_tokens, 500)
+        self.assertEqual(summary.last_cache_read_tokens, 4000)
+        self.assertIsNotNone(summary.last_cost_usd)
+
+    def test_last_turn_is_the_most_recent_completed_turn(self):
+        path = self.write_transcript(
+            "proj-a", "s1.jsonl",
+            turn("m1", OPUS, input_tokens=1000, output_tokens=1000)
+            + turn("m2", OPUS, input_tokens=2000, output_tokens=500),
+        )
+
+        summary = summarize_session(path)
+
+        self.assertEqual(summary.last_input_tokens, 2000)  # the m2 turn, not m1
+        self.assertEqual(summary.last_output_tokens, 500)
+
+    def test_last_turn_cost_none_for_unpriceable_model_tokens_still_carried(self):
+        path = self.write_transcript("proj-a", "s1.jsonl", turn("m1", UNKNOWN))
+
+        summary = summarize_session(path)
+
+        self.assertIsNone(summary.last_cost_usd)        # renders "$?"
+        self.assertEqual(summary.last_output_tokens, 1000)  # turn still exists
+
+    def test_last_turn_all_none_without_a_completed_turn(self):
+        path = self.write_transcript("proj-a", "s1.jsonl", [PROMPT])
+
+        summary = summarize_session(path)
+
+        self.assertIsNone(summary.last_cost_usd)
+        self.assertIsNone(summary.last_input_tokens)
+        self.assertIsNone(summary.last_output_tokens)
+        self.assertIsNone(summary.last_cache_read_tokens)
+
 
 class CacheAndActiveFlag(SessionsBase):
     def test_active_flag_marks_only_the_newest(self):

@@ -44,7 +44,7 @@ from dataclasses import dataclass, replace
 from cc_token_tracker import liveness
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.context import estimate_context
-from cc_token_tracker.display import _session_cost
+from cc_token_tracker.display import _session_cost, _turn_usd
 from cc_token_tracker.reader import read_transcript
 from cc_token_tracker.segmentation import segment_turns
 from cc_token_tracker.turn_cost import turn_costs
@@ -104,6 +104,18 @@ class SessionSummary:
     render from ``last_write`` against the current ``now`` (see
     :func:`cc_token_tracker.roster.build_roster_view`). The default is a
     placeholder the render pass always overwrites.
+
+    The four ``last_*`` fields are this session's most recent COMPLETED turn,
+    the presentation data for the v0.6 all-expanded roster block's ``Last:``
+    line. Every session (not just the auto-followed one) renders its own block,
+    so each carries its own last-turn figures straight from the parse rather
+    than from a single live ``Frame``. They reuse the frozen pricing/turn
+    output verbatim: ``last_input_tokens`` folds cache-creation into input just
+    like the hero's IN cell, ``last_output_tokens`` is the turn's output,
+    ``last_cache_read_tokens`` its cache-read, and ``last_cost_usd`` comes from
+    :func:`cc_token_tracker.display._turn_usd` (``None`` when the model is
+    unpriceable). All four are ``None`` when the transcript has no completed
+    turn yet, which the renderer shows honestly.
     """
 
     project: str
@@ -117,6 +129,10 @@ class SessionSummary:
     last_write: float
     is_active: bool
     state: str = liveness.ACTIVE
+    last_cost_usd: float | None = None
+    last_input_tokens: int | None = None
+    last_output_tokens: int | None = None
+    last_cache_read_tokens: int | None = None
 
 
 def discover_sessions(
@@ -200,6 +216,19 @@ def summarize_session(path: str, *, is_active: bool = False) -> SessionSummary |
     total_cost_usd, unpriced = _session_cost(costs)
     estimate = estimate_context(result.records)
 
+    # The session's most recent COMPLETED turn, for the roster block's "Last:"
+    # line. Reads the frozen turn output and prices via the frozen table; folds
+    # cache-creation into input exactly like the hero's IN cell.
+    last = next((cost for cost in reversed(costs) if cost.complete), None)
+    if last is not None:
+        last_input_tokens = last.input_tokens + last.cache_creation_input_tokens
+        last_output_tokens = last.output_tokens
+        last_cache_read_tokens = last.cache_read_input_tokens
+        last_cost_usd = _turn_usd(last)
+    else:
+        last_cost_usd = last_input_tokens = None
+        last_output_tokens = last_cache_read_tokens = None
+
     return SessionSummary(
         project=os.path.basename(os.path.dirname(path)),
         file_name=os.path.basename(path),
@@ -211,6 +240,10 @@ def summarize_session(path: str, *, is_active: bool = False) -> SessionSummary |
         context_percent=estimate.percent,
         last_write=stat.st_mtime,
         is_active=is_active,
+        last_cost_usd=last_cost_usd,
+        last_input_tokens=last_input_tokens,
+        last_output_tokens=last_output_tokens,
+        last_cache_read_tokens=last_cache_read_tokens,
     )
 
 

@@ -1,28 +1,33 @@
-"""Multi-session roster view: the v0.5 default tokey screen.
+"""Multi-session roster view: the v0.6 all-expanded tokey screen.
 
-One panel listing every discovered session (newest first, 7-day window), the
-active one marked ▶ and auto-expanded inline with a context gauge plus the
-SAME hero (LAST PROMPT) section the single-session panel renders -- composed
-from display's existing component functions (``_figure_grid``, ``_cost_figure``,
-``_num``), never reimplemented. The RECENT strip was dropped product-wide in
-v0.6.0; the roster renders the hero only. No keyboard input: the view
-is render-only, and the active row follows recency exactly like the v0.3+
-auto-follow (the newest transcript is the active one, so it is always the top
-row).
+One panel, one compact block per live session, newest first (7-day window).
+Every block stacks the same four-part shape, so a newly-started session just
+adds another block:
 
-Liveness scope (v0.6.0): each row carries an active/closing/dropped label from
+    ▶ my-api-server                                            active
+      73% ·· ████████░░░ · ~27k left
+      Last: $0.142 · IN 12.4k · OUT 3.2k · CACHE 8.1k
+
+The ``▶`` marks the auto-followed session (the newest transcript, exactly like
+the v0.3+ auto-follow); the right-hand label is the session's liveness state.
+The block is summary-driven: every figure comes from the per-session
+:class:`cc_token_tracker.sessions.SessionSummary`, including the ``Last:`` line
+(the session's most recent completed turn). There is no live ``Frame`` in this
+view and no keyboard input.
+
+Liveness scope (v0.6.0): each block carries an active/closing/dropped label from
 its transcript mtime (:mod:`cc_token_tracker.liveness`). Dropped sessions leave
 the roster; the header counts the live ("active") ones only; closing sessions
-stay visible but uncounted. The footer's all-sessions totals are unaffected and
-still cover every discovered session.
+stay visible but uncounted. The footer total is ACTIVE-ONLY, the same scope as
+the header count.
 
-Honesty markers carried into every cell:
-- COST: ``$?`` when nothing in the session could be priced; a trailing ``?``
-  (``$1.23?``) when the figure is partial because some turn went unpriced.
-- CONTEXT: ``?`` when the limit is unknown (model absent from the limits
-  table); a trailing ``?`` (``104%?``) when the estimate exceeds the limit.
-The percent is an ESTIMATE from the last prompt's input-side token counts; see
-:mod:`cc_token_tracker.context`.
+Honesty markers carried into every block:
+- LAST cost: ``$?`` when the last turn's model is unpriceable; ``no completed
+  turn yet`` when the transcript has not finished a turn.
+- CONTEXT: ``?`` when the limit is unknown (model absent from the limits table)
+  with no bar invented; a trailing ``?`` (``104%?``) when the estimate exceeds
+  the documented window. The percent is an ESTIMATE from the last prompt's
+  input-side token counts; see :mod:`cc_token_tracker.context`.
 """
 
 from __future__ import annotations
@@ -41,17 +46,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from cc_token_tracker.display import (
-    _ACCENT,
-    MAX_PANEL_WIDTH,
-    DisplayState,
-    Frame,
-    _cost_figure,
-    _figure_grid,
-    _FlashState,
-    _num,
-    _read_for_tick,
-)
+from cc_token_tracker.display import _ACCENT, MAX_PANEL_WIDTH
 from cc_token_tracker.liveness import ACTIVE, DROPPED, classify_liveness
 from cc_token_tracker.sessions import SessionCache, SessionSummary
 
@@ -60,8 +55,6 @@ __all__ = [
     "RosterView",
     "build_roster_view",
     "percent_figure",
-    "cost_figure",
-    "age_figure",
     "render_roster",
     "run",
     "main",
@@ -69,21 +62,19 @@ __all__ = [
 
 _LOG = logging.getLogger(__name__)
 
-# At most this many session rows render; overflow becomes a "+N more" line
-# above the footer. The footer totals still cover every discovered session.
+# At most this many session blocks render; overflow becomes a "+N more" line
+# above the footer. The footer total still covers every active session.
 ROSTER_LIMIT = 10
 
-# Width of the expanded row's context bar, in cells.
-_BAR_WIDTH = 30
+# Width of a block's context bar, in cells.
+_BAR_WIDTH = 24
 
-# Fixed widths for the numeric columns so the collapsed rows, which render as
-# separate grids around the expanded block, stay column-aligned. PROJECT takes
-# the remaining width.
-_COL_MARKER = 2
-_COL_TOTAL_TOK = 11
-_COL_COST = 9
-_COL_CONTEXT = 8
-_COL_LAST = 8
+# Left indent (cells) for a block's body, so the context/Last lines line up
+# under the project name rather than under the ▶ marker column.
+_MARKER_WIDTH = 2
+
+# Context gauge colour (distinct from the cyan ▶/title accent).
+_CONTEXT_COLOR = "yellow"
 
 
 @dataclass(frozen=True)
@@ -93,7 +84,7 @@ class RosterView:
     ``sessions`` is the on-screen roster: every summary whose liveness is not
     "dropped" (so active + closing), newest first, each carrying its freshly
     computed ``state``. ``active_count`` counts the "active" ones ONLY --
-    closing sessions stay on screen as rows but are never counted. Dropped
+    closing sessions stay on screen as blocks but are never counted. Dropped
     sessions are absent from ``sessions`` entirely. This is presentation, not
     accounting: the cost and token figures inside each summary are reused
     verbatim, never recomputed here.
@@ -124,21 +115,8 @@ def build_roster_view(
     return RosterView(sessions=sessions, active_count=active_count)
 
 
-def _active_header(active_count: int) -> Text:
-    """Top line: how many sessions are live right now -- "active" only.
-
-    Closing sessions render as rows below but are deliberately left out of this
-    figure; dropped sessions are gone from the roster entirely. Presentation
-    only: this count never touches the footer's cost/token totals.
-    """
-    return Text.assemble(
-        (str(active_count), f"bold {_ACCENT}"),
-        (" active", "dim"),
-    )
-
-
 def percent_figure(percent: float | None) -> str:
-    """The CONTEXT cell: ``NN%``, ``NNN%?`` past 100, ``?`` when unknown.
+    """The context percent: ``NN%``, ``NNN%?`` past 100, ``?`` when unknown.
 
     An unknown limit yields ``?`` (the limits table never guesses). A percent
     above 100 keeps its number but gains a trailing ``?`` -- the estimate
@@ -151,215 +129,141 @@ def percent_figure(percent: float | None) -> str:
     return figure + "?" if percent > 100 else figure
 
 
-def cost_figure(total_cost_usd: float, unpriced: bool) -> str:
-    """A session's COST cell, with the unpriced marker surviving.
-
-    A fully unpriceable session ($0 summed, flag set) renders ``$?`` -- the
-    same never-$0.00 rule as the per-turn figure. A partial total (some turns
-    priced, some not) renders its dollars with a trailing ``?`` so the figure
-    reads as a floor, not a total.
-    """
-    if unpriced and total_cost_usd == 0.0:
-        return "$?"
-    figure = f"${total_cost_usd:.2f}"
-    return figure + "?" if unpriced else figure
+def _k(tokens: int) -> str:
+    """Token count in compact thousands: ``12.4k``, ``0.8k``, ``67.2k``."""
+    return f"{tokens / 1000:.1f}k"
 
 
-def age_figure(age_seconds: float) -> str:
-    """Humanized age for the LAST column: ``4m ago``, ``1h ago``, ``2d ago``.
-
-    Sub-minute ages render ``now``. The discovery window caps ages at days,
-    so no larger unit is needed.
-    """
-    minutes = int(age_seconds // 60)
-    if minutes < 1:
-        return "now"
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours = int(age_seconds // 3600)
-    if hours < 24:
-        return f"{hours}h ago"
-    return f"{int(age_seconds // 86400)}d ago"
-
-
-def _row_grid() -> Table:
-    """One column spec shared by the header and every row grid.
-
-    Fixed widths on the marker and numeric columns keep separate grids
-    aligned (the expanded block splits the rows into grids above and below
-    it); PROJECT flexes to the remaining width and truncates with an
-    ellipsis.
-    """
-    grid = Table.grid(expand=True, padding=(0, 1))
-    grid.add_column(width=_COL_MARKER)                       # ▶ marker
-    grid.add_column(justify="left", ratio=1, no_wrap=True,
-                    overflow="ellipsis")                     # PROJECT
-    grid.add_column(justify="right", width=_COL_TOTAL_TOK)   # TOTAL TOK
-    grid.add_column(justify="right", width=_COL_COST)        # COST
-    grid.add_column(justify="right", width=_COL_CONTEXT)     # CONTEXT
-    grid.add_column(justify="right", width=_COL_LAST)        # LAST
+def _header(active_count: int, interval: float) -> Table:
+    """Top line: ``tokey`` left, ``N active session(s) · [interval]`` right."""
+    grid = Table.grid(expand=True)
+    grid.add_column(justify="left", ratio=1)
+    grid.add_column(justify="right")
+    plural = "" if active_count == 1 else "s"
+    right = Text.assemble(
+        (f"{active_count} active session{plural}", "dim"),
+        (" · ", "dim"),
+        (f"[{interval:.1f}s]", "dim"),
+    )
+    grid.add_row(Text("tokey", style=f"bold {_ACCENT}"), right)
     return grid
 
 
-def _header_row() -> Table:
-    grid = _row_grid()
-    grid.add_row(
-        Text(""),
-        Text("PROJECT", style="dim"),
-        Text("TOTAL TOK", style="dim"),
-        Text("COST", style="dim"),
-        Text("CONTEXT", style="dim"),
-        Text("LAST", style="dim"),
-    )
-    return grid
+def _context_line(summary: SessionSummary) -> Text:
+    """A block's one-line context gauge: ``73% ·· ████░░ · ~27k left``.
 
-
-def _session_row(summary: SessionSummary, *, now: float) -> Table:
-    """One collapsed row. The active row gets the ▶ marker, bold project, and
-    ``active`` in the LAST column; others show their humanized age, dim."""
-    active = summary.is_active
-    style = "" if active else "dim"
-    last_cell = (
-        Text("active", style=_ACCENT)
-        if active
-        else Text(age_figure(now - summary.last_write), style="dim")
-    )
-    grid = _row_grid()
-    grid.add_row(
-        Text("▶", style=_ACCENT) if active else Text(""),
-        Text(summary.project, style="bold" if active else "dim",
-             no_wrap=True, overflow="ellipsis"),
-        Text(_num(summary.total_tokens), style=style),
-        Text(cost_figure(summary.total_cost_usd, summary.unpriced),
-             style=style),
-        Text(percent_figure(summary.context_percent), style=style),
-        last_cell,
-    )
-    return grid
-
-
-def _context_lines(summary: SessionSummary) -> list:
-    """The expanded row's context gauge: the used/limit line, the bar, and the
-    percent line, honest about every unknown.
-
-    Unknown used or limit renders ``?`` in its slot. The bar and the
-    ``~Nk left`` remainder need a real percent/limit, so they are omitted
-    (not faked) when the limit is unknown; an over-100 estimate fills the bar
-    completely and shows ``~0k left`` beside the ``NNN%?`` marker.
+    An unknown limit renders an honest ``context limit unknown for this model``
+    with no bar invented. An over-100 estimate fills the bar and shows
+    ``~0k left`` beside the ``NNN%?`` marker.
     """
-    used, limit = summary.context_used, summary.context_limit
-    used_figure = _num(used) if used is not None else "?"
-    limit_figure = _num(limit) if limit is not None else "?"
-    lines: list = [
-        Text.assemble(
-            ("CONTEXT", "bold"),
-            (" · ", "dim"),
-            (f"{used_figure} / {limit_figure} tokens", ""),
-        )
-    ]
     percent = summary.context_percent
     if percent is None:
-        lines.append(Text("context limit unknown for this model", style="dim"))
-        return lines
+        return Text("context limit unknown for this model", style="dim")
     filled = round(min(percent, 100.0) / 100.0 * _BAR_WIDTH)
-    lines.append(
-        Text("█" * filled, style=_ACCENT)
+    bar = (
+        Text("█" * filled, style=_CONTEXT_COLOR)
         + Text("░" * (_BAR_WIDTH - filled), style="dim")
     )
-    remaining_k = max(0, (limit or 0) - (used or 0)) // 1000
-    lines.append(
-        Text.assemble(
-            (percent_figure(percent), "bold"),
-            (" · ", "dim"),
-            (f"~{remaining_k}k left", "dim"),
-        )
+    remaining_k = max(0, (summary.context_limit or 0) - (summary.context_used or 0)) // 1000
+    return (
+        Text.assemble((percent_figure(percent), f"bold {_CONTEXT_COLOR}"), (" ·· ", "dim"))
+        + bar
+        + Text.assemble((" · ", "dim"), (f"~{remaining_k}k left", "dim"))
     )
-    return lines
 
 
-def _hero_section(frame: Frame, *, flash: bool) -> list:
-    """The LAST PROMPT block, composed from display's components with the SAME
-    labels, folding, and styles as render_panel (running... dimming, flash
-    accent, IN folding cache creation into input). The figure logic itself --
-    grid layout, thousands grouping, the $?-never-$0.00 cost cell -- is
-    display's, reused not reimplemented."""
-    delta = frame.delta
-    label = Text("LAST PROMPT", style="bold")
-    if delta is None:
-        return [label, Text("waiting for first command", style="dim italic")]
-    if not delta.complete:
-        label.append("  running...", style="dim")
-        value_style = "dim"
-    elif flash:
-        value_style = f"bold reverse {_ACCENT}"
-    else:
-        value_style = f"bold {_ACCENT}"
-    in_tokens = delta.input_tokens + delta.cache_creation_input_tokens
-    body = _figure_grid(
-        [
-            ("IN", Text(_num(in_tokens), style=value_style)),
-            ("OUT", Text(_num(delta.output_tokens), style=value_style)),
-            ("CACHE READ",
-             Text(_num(delta.cache_read_input_tokens), style=value_style)),
-            ("COST", Text(_cost_figure(delta), style=value_style)),
-        ],
-        divider=True,
+def _last_line(summary: SessionSummary) -> Text:
+    """A block's ``Last:`` line: the most recent completed turn's figures.
+
+    ``$?`` when that turn's model is unpriceable; ``no completed turn yet`` when
+    the transcript has finished none. ``CACHE`` is shown only when the turn read
+    cache (non-zero), matching the single-session hero's cache cell otherwise
+    staying silent. IN folds cache-creation into input (done in the summary).
+    """
+    if summary.last_output_tokens is None:
+        return Text.assemble(("Last: ", "dim"), ("no completed turn yet", "dim italic"))
+    cost = "$?" if summary.last_cost_usd is None else f"${summary.last_cost_usd:.3f}"
+    parts: list = [
+        ("Last: ", "dim"),
+        (cost, ""),
+        (" · ", "dim"),
+        (f"IN {_k(summary.last_input_tokens or 0)}", ""),
+        (" · ", "dim"),
+        (f"OUT {_k(summary.last_output_tokens)}", ""),
+    ]
+    if (summary.last_cache_read_tokens or 0) > 0:
+        parts.append((" · ", "dim"))
+        parts.append((f"CACHE {_k(summary.last_cache_read_tokens)}", ""))
+    return Text.assemble(*parts)
+
+
+def _session_block(summary: SessionSummary) -> Group:
+    """One session's compact block: a header line (marker, project, liveness
+    label) over the indented context and Last lines. The ``▶`` marks the
+    auto-followed session; the right label is the liveness state."""
+    is_live = summary.state == ACTIVE
+    label = (
+        Text("active", style="bold green")
+        if is_live
+        else Text("closing", style="dim")
     )
-    return [label, body]
-
-
-def _expanded_block(
-    summary: SessionSummary, frame: Frame, *, flash: bool
-) -> Padding:
-    """Everything inside the active row's expansion, indented under the row:
-    the context gauge, then the reused hero (LAST PROMPT) section. The RECENT
-    strip was removed product-wide in v0.6.0; ``frame.recent`` is left untouched
-    (compute_frame still populates it) but the roster no longer renders it."""
-    items = _context_lines(summary)
-    items.append(Text(""))
-    items.extend(_hero_section(frame, flash=flash))
-    return Padding(Group(*items), (0, 0, 0, _COL_MARKER + 1))
+    head = Table.grid(expand=True, padding=0)
+    head.add_column(width=_MARKER_WIDTH)
+    head.add_column(justify="left", ratio=1, no_wrap=True, overflow="ellipsis")
+    head.add_column(justify="right")
+    head.add_row(
+        Text("▶", style=_ACCENT) if summary.is_active else Text(""),
+        Text(summary.project, style="bold" if is_live else "dim"),
+        label,
+    )
+    body = Padding(
+        Group(_context_line(summary), _last_line(summary)),
+        (0, 0, 0, _MARKER_WIDTH),
+    )
+    return Group(head, body)
 
 
 def _footer(active: list[SessionSummary]) -> Table:
-    """The ACTIVE-ONLY total: ``active: $X.XX · N.NNM tok``, with
-    ``(+ unpriced)`` appended when ANY active session carries the flag (the
-    dollar figure then covers the priceable turns only, and says so). Scope
-    matches the header's active count exactly: closing and dropped sessions are
-    excluded, while active rows hidden by the ROSTER_LIMIT cap are still summed
-    in. No session count -- the header already states how many are active."""
+    """The ACTIVE-ONLY total: ``active: $X.XXX · N.Nk tok`` left, with a right
+    ``(+ unpriced)`` flag when ANY active session carries it (the dollar figure
+    then covers the priceable turns only). Scope matches the header's active
+    count exactly: closing and dropped sessions are excluded, while active
+    blocks hidden by the ROSTER_LIMIT cap are still summed in. No session count
+    -- the header already states how many are active."""
     total_cost = sum(s.total_cost_usd for s in active)
     total_tokens = sum(s.total_tokens for s in active)
-    figure = f"active: ${total_cost:.2f} · {total_tokens / 1e6:.2f}M tok"
-    if any(s.unpriced for s in active):
-        figure += " (+ unpriced)"
+    left = Text(f"active: ${total_cost:.3f} · {_k(total_tokens)} tok", style="bold")
+    right = (
+        Text("(+ unpriced)", style="yellow")
+        if any(s.unpriced for s in active)
+        else Text("")
+    )
     grid = Table.grid(expand=True)
-    grid.add_column(justify="right", ratio=1)
-    grid.add_row(Text(figure, style="bold"))
+    grid.add_column(justify="left", ratio=1)
+    grid.add_column(justify="right")
+    grid.add_row(left, right)
     return grid
 
 
 def render_roster(
     summaries: list[SessionSummary],
-    frame: Frame,
     *,
-    flash: bool = False,
     width: int | None = None,
     now: float | None = None,
+    interval: float = 1.0,
 ) -> Panel:
-    """Render the roster to a rich Panel. Pure given ``now``; no IO.
+    """Render the all-expanded roster to a rich Panel. Pure given ``now``; no IO.
 
-    ``summaries`` is the session-cache output, newest first, the active entry
-    flagged; ``frame`` is the live-path Frame whose hero/RECENT content fills
-    the active row's expansion. Liveness scope is applied here (see
+    ``summaries`` is the session-cache output, newest first, the auto-followed
+    entry flagged ``is_active``. Liveness scope is applied here (see
     :func:`build_roster_view`): dropped sessions leave the roster, the header
     counts only the live ("active") ones, and closing sessions stay visible but
-    uncounted. Rows beyond ROSTER_LIMIT collapse into a "+N more" line above
-    the footer; the footer total is ACTIVE-ONLY (the same scope as the header
-    count): closing and dropped sessions are excluded, while active rows hidden
-    by the cap are still summed. ``now`` drives both the liveness scope
-    and the humanized LAST column (defaults to the current time; tests pin it).
-    No input handling and no key hints exist in this view.
+    uncounted. Every surviving session renders as a compact block; blocks beyond
+    ROSTER_LIMIT collapse into a "+N more" line above the footer. The footer
+    total is ACTIVE-ONLY (the same scope as the header count): closing and
+    dropped sessions are excluded, while active blocks hidden by the cap are
+    still summed. ``now`` drives the liveness scope (defaults to the current
+    time; tests pin it); ``interval`` is shown in the header refresh tag.
     """
     if now is None:
         now = time.time()
@@ -367,62 +271,51 @@ def render_roster(
     view = build_roster_view(summaries, now=now)
     roster = view.sessions
 
-    items: list = [_active_header(view.active_count)]
+    items: list = [_header(view.active_count, interval), Rule()]
     if roster:
-        items.append(_header_row())
         shown = roster[:ROSTER_LIMIT]
         for summary in shown:
-            items.append(_session_row(summary, now=now))
-            if summary.is_active:
-                items.append(_expanded_block(summary, frame, flash=flash))
+            items.append(_session_block(summary))
+            items.append(Rule(style="dim"))
         omitted = len(roster) - len(shown)
         if omitted > 0:
             items.append(Text(f"+{omitted} more", style="dim"))
+            items.append(Rule(style="dim"))
     else:
         items.append(Text("no sessions in the last 7 days", style="dim italic"))
+        items.append(Rule(style="dim"))
 
-    items.append(Rule(style="dim"))
     items.append(_footer([s for s in roster if s.state == ACTIVE]))
 
-    active = next((s for s in roster if s.is_active), None)
-    subtitle = Text(active.file_name, style="dim") if active else None
     return Panel(
         Group(*items),
-        title=Text("Tokey", style="bold"),
-        subtitle=subtitle,
         box=box.ROUNDED,
-        padding=(1, 4),
+        padding=(1, 2),
         width=width,
     )
 
 
 def run(interval: float = 1.0) -> int:
-    """Poll loop: the roster as the default and only view.
+    """Poll loop: the all-expanded roster as the default and only view.
 
-    Same skeleton as the single-panel loop it replaces: the ACTIVE session
-    refreshes through the existing live path (find_active_transcript ->
-    read_transcript -> DisplayState), so auto-follow and the session-switch
-    reset behave exactly as before; the other rows come from the session
-    cache, which re-parses a transcript only when its (mtime, size) moves. A
-    tick that raises is logged and skipped; KeyboardInterrupt exits cleanly.
+    Each tick re-runs discovery and re-parses the active transcript through the
+    session cache (which re-parses a non-active transcript only when its
+    (mtime, size) moves), then renders. A newly-started session therefore
+    appears within one tick with no restart; auto-follow tracks the newest
+    transcript. A tick that raises is logged and skipped; KeyboardInterrupt
+    exits cleanly.
     """
-    state = DisplayState()
-    flash = _FlashState(interval=interval)
     cache = SessionCache()
     console = Console()
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
             while True:
                 try:
-                    frame = state.update(_read_for_tick())
                     summaries = cache.summaries()
                     target_width = min(console.width, MAX_PANEL_WIDTH)
                     live.update(
                         render_roster(
-                            summaries,
-                            frame,
-                            flash=flash.observe(frame),
-                            width=target_width,
+                            summaries, width=target_width, interval=interval
                         ),
                         refresh=True,
                     )
