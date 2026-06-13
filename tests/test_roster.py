@@ -173,9 +173,12 @@ class ActiveExpansion(unittest.TestCase):
         self.assertIn("IN", text)
         self.assertIn("CACHE READ", text)
         self.assertIn("1,500", text)  # IN folds input + cache creation
-        self.assertIn("RECENT", text)
-        self.assertIn("fix the tests", text)
-        self.assertIn("+2 more", text)
+        # RECENT strip removed product-wide in v0.6.0: the frame still carries
+        # recent data (text + recent_omitted), but the roster no longer renders
+        # any of it.
+        self.assertNotIn("RECENT", text)
+        self.assertNotIn("fix the tests", text)
+        self.assertNotIn("+2 more", text)
 
     def test_unknown_limit_expansion_is_honest(self):
         active = make_summary(project="proj-live", is_active=True,
@@ -222,7 +225,7 @@ class FooterAndCaps(unittest.TestCase):
         self.assertIn("proj-only", text)
         self.assertIn("CONTEXT · 98,304 / 200,000 tokens", text)
         self.assertIn("LAST PROMPT", text)
-        self.assertIn("RECENT", text)
+        self.assertNotIn("RECENT", text)  # RECENT strip removed in v0.6.0
         self.assertIn("1 session", text)
         self.assertNotIn("1 sessions", text)
 

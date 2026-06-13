@@ -2,9 +2,10 @@
 
 One panel listing every discovered session (newest first, 7-day window), the
 active one marked ▶ and auto-expanded inline with a context gauge plus the
-SAME hero and RECENT sections the single-session panel renders -- composed from
-display's existing component functions (``_figure_grid``, ``_recent_rows``,
-``_cost_figure``, ``_num``), never reimplemented. No keyboard input: the view
+SAME hero (LAST PROMPT) section the single-session panel renders -- composed
+from display's existing component functions (``_figure_grid``, ``_cost_figure``,
+``_num``), never reimplemented. The RECENT strip was dropped product-wide in
+v0.6.0; the roster renders the hero only. No keyboard input: the view
 is render-only, and the active row follows recency exactly like the v0.3+
 auto-follow (the newest transcript is the active one, so it is always the top
 row).
@@ -50,7 +51,6 @@ from cc_token_tracker.display import (
     _FlashState,
     _num,
     _read_for_tick,
-    _recent_rows,
 )
 from cc_token_tracker.liveness import ACTIVE, DROPPED, classify_liveness
 from cc_token_tracker.sessions import SessionCache, SessionSummary
@@ -308,29 +308,16 @@ def _hero_section(frame: Frame, *, flash: bool) -> list:
     return [label, body]
 
 
-def _recent_section(frame: Frame) -> list:
-    """The RECENT block exactly as the panel shows it: display's row renderer
-    over frame.recent as given, plus the same "+N more" overflow line."""
-    if not frame.recent:
-        return []
-    items: list = [Text("RECENT", style="bold"), _recent_rows(frame.recent)]
-    if frame.recent_omitted:
-        items.append(Text(f"+{frame.recent_omitted} more", style="dim"))
-    return items
-
-
 def _expanded_block(
     summary: SessionSummary, frame: Frame, *, flash: bool
 ) -> Padding:
     """Everything inside the active row's expansion, indented under the row:
-    context gauge, then the reused hero and RECENT sections."""
+    the context gauge, then the reused hero (LAST PROMPT) section. The RECENT
+    strip was removed product-wide in v0.6.0; ``frame.recent`` is left untouched
+    (compute_frame still populates it) but the roster no longer renders it."""
     items = _context_lines(summary)
     items.append(Text(""))
     items.extend(_hero_section(frame, flash=flash))
-    recent = _recent_section(frame)
-    if recent:
-        items.append(Text(""))
-        items.extend(recent)
     return Padding(Group(*items), (0, 0, 0, _COL_MARKER + 1))
 
 
