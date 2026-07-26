@@ -1,18 +1,16 @@
-"""Tests for cc_token_tracker.reader (Ticket 5).
+"""Tests for cc_token_tracker.reader.
 
 Uses real temp files (tempfile), not mocks of open. read_transcript full
-re-reads an already-resolved transcript path each tick; find_active_transcript
-resolves WHICH path by recency.
+re-reads an already-resolved transcript path each tick; WHICH path is resolved
+upstream by sessions.discover_sessions (see tests/test_sessions.py).
 """
 
 import os
 import tempfile
 import unittest
-from unittest import mock
 
 from cc_token_tracker.parser import TranscriptRecord
-from cc_token_tracker.reader import find_active_transcript, read_transcript
-
+from cc_token_tracker.reader import read_transcript
 
 # A genuine typed prompt (no message id) and an assistant line carrying a
 # message id, so tests can name which records came back.
@@ -30,8 +28,8 @@ def assistant_line(message_id, text):
 
 class ReadTranscript(unittest.TestCase):
     """read_transcript parses an already-resolved transcript path. The path is
-    resolved upstream (find_active_transcript); these tests pin the read/parse
-    and no-op behavior by handing a path in directly.
+    resolved upstream by discovery; these tests pin the read/parse and no-op
+    behavior by handing a path in directly.
     """
 
     def setUp(self):
@@ -49,7 +47,7 @@ class ReadTranscript(unittest.TestCase):
         self.assertIsNone(result.transcript_path)
 
     def test_none_path_is_noop(self):
-        # nothing resolved this tick (find_active_transcript returned None)
+        # nothing resolved this tick (discovery found no transcript)
         self.assert_noop(read_transcript(None))
 
     def test_missing_transcript_is_noop(self):
@@ -130,75 +128,6 @@ class ReadTranscript(unittest.TestCase):
         ids_second = [r.message_id for r in second.records]
         self.assertIn("msgB", ids_second)
         self.assertNotIn("msgA", ids_second)
-
-
-class FindActiveTranscript(unittest.TestCase):
-    """find_active_transcript resolves the most recently modified *.jsonl under
-    ~/.claude/projects (recursively), or None. A tmp projects dir is substituted
-    via os.path.expanduser so the real home is never touched; mtimes are set
-    explicitly so recency is deterministic.
-    """
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        # The dir find_active_transcript will resolve "~/.claude/projects" to.
-        self.projects = os.path.join(self.tmp.name, "projects")
-
-    def write_jsonl(self, path, mtime):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(PROMPT + "\n")
-        os.utime(path, (mtime, mtime))
-
-    def test_returns_newest_of_several(self):
-        # Three transcripts, one nested in a subdir to exercise the recursive
-        # walk; explicit, distinct mtimes. The newest wins regardless of depth.
-        os.makedirs(self.projects, exist_ok=True)
-        older = os.path.join(self.projects, "older.jsonl")
-        middle = os.path.join(self.projects, "proj-a", "middle.jsonl")
-        newest = os.path.join(self.projects, "proj-b", "newest.jsonl")
-        self.write_jsonl(older, 1000)
-        self.write_jsonl(middle, 2000)
-        self.write_jsonl(newest, 3000)
-
-        with mock.patch("os.path.expanduser", return_value=self.projects):
-            self.assertEqual(find_active_transcript(), newest)
-
-    def test_missing_dir_returns_none(self):
-        # The projects dir is never created.
-        with mock.patch("os.path.expanduser", return_value=self.projects):
-            self.assertIsNone(find_active_transcript())
-
-    def test_dir_without_jsonl_returns_none(self):
-        # The dir exists but holds no .jsonl file.
-        os.makedirs(self.projects, exist_ok=True)
-        with open(os.path.join(self.projects, "notes.txt"), "w",
-                  encoding="utf-8") as handle:
-            handle.write("not a transcript")
-        with mock.patch("os.path.expanduser", return_value=self.projects):
-            self.assertIsNone(find_active_transcript())
-
-    def test_unreadable_entry_is_skipped(self):
-        # One entry's mtime probe raises OSError (a file removed mid-scan or a
-        # permission error on that entry). It is skipped without crashing, and
-        # the other entry still resolves -- even though the failing one is newer.
-        os.makedirs(self.projects, exist_ok=True)
-        good = os.path.join(self.projects, "good.jsonl")
-        bad = os.path.join(self.projects, "bad.jsonl")
-        self.write_jsonl(good, 1000)
-        self.write_jsonl(bad, 5000)  # newer, but its probe will fail
-
-        real_getmtime = os.path.getmtime
-
-        def flaky_getmtime(path):
-            if path == bad:
-                raise OSError("simulated mid-scan removal")
-            return real_getmtime(path)
-
-        with mock.patch("os.path.expanduser", return_value=self.projects), \
-                mock.patch("os.path.getmtime", side_effect=flaky_getmtime):
-            self.assertEqual(find_active_transcript(), good)
 
 
 if __name__ == "__main__":

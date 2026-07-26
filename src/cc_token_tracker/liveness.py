@@ -1,12 +1,17 @@
-"""Session liveness classification: active / closing / dropped (v0.6.0, T1).
+"""Session liveness classification: active / closing / dropped.
 
-A pure, presentation-scope helper. A session's liveness is derived ONLY from
-how long ago its transcript was last written -- the file mtime captured during
-discovery (``SessionSummary.last_write``, an ``os.stat`` field). No transcript
-is opened or re-read to derive activity; the mtime is free from the stat the
-discovery pass already does.
+A pure, presentation-scope helper with two entry points:
 
-The boundaries are exact and authoritative (``age = now - last_write``, in
+- :func:`classify_with_marker` is what the roster calls. A hook marker (see
+  :mod:`cc_token_tracker.markers`) is authoritative when present, so an exited
+  session drops at once and an idle-but-open one stays active.
+- :func:`classify_liveness` is the no-marker fallback, deriving liveness ONLY
+  from how long ago the transcript was last written -- the file mtime captured
+  during discovery (``SessionSummary.last_write``, an ``os.stat`` field). No
+  transcript is opened or re-read to derive activity; the mtime is free from the
+  stat the discovery pass already does.
+
+The mtime boundaries are exact and authoritative (``age = now - last_write``, in
 seconds, half-open on the low side):
 
     age < 600            -> "active"
@@ -15,22 +20,19 @@ seconds, half-open on the low side):
 
 This module decides the LABEL only. Roster scope -- which states stay on screen
 and which count toward the header's active figure -- lives with the panel
-assembly that consumes these labels; see :func:`cc_token_tracker.roster.build_roster_view`.
+assembly that consumes these labels; see
+:func:`cc_token_tracker.roster.build_roster_view`.
 """
 
 from __future__ import annotations
 
-from cc_token_tracker.markers import (
-    CLOSED,
-    MARKER_STALE_AFTER_SECONDS,
-    OPEN,
-)
+from cc_token_tracker.markers import CLOSED, MARKER_STALE_AFTER_SECONDS, OPEN
 
 __all__ = [
     "ACTIVE",
     "CLOSING",
-    "DROPPED",
     "CLOSING_AFTER_SECONDS",
+    "DROPPED",
     "DROPPED_AFTER_SECONDS",
     "classify_liveness",
     "classify_with_marker",

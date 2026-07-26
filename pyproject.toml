@@ -25,3 +25,20 @@ where = ["src"]
 [tool.ruff]
 target-version = "py311"
 src = ["src", "tests"]
+line-length = 88
+
+[tool.ruff.lint]
+# E/W/F: pycodestyle + pyflakes (unused imports and names, line length).
+# I: import order (stdlib, third-party, first-party). UP: modern syntax for the
+# 3.11 floor. B: bugbear. SIM: simplifications. RUF: ruff's own checks, which
+# include the sorted-__all__ rule the modules follow.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
+# RUF001: the panel is deliberately drawn with box, block, and middle-dot
+# characters that this rule flags as ambiguous. They are the product.
+ignore = ["RUF001"]
+
+[tool.ruff.lint.per-file-ignores]
+# The curated aphorism pool is DATA: one (mood, phrase) entry per line keeps it
+# eyeball-vettable (test_mood.py guards it), and wrapping entries across lines
+# would hide exactly what those guards are looking at.
+"src/cc_token_tracker/mood.py" = ["E501"]

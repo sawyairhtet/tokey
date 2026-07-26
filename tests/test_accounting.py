@@ -48,7 +48,8 @@ class AccountUsage(unittest.TestCase):
     def test_multiline_message_counted_once(self):
         # Load-bearing: 3 lines, same message_id, identical usage -> counted
         # ONCE, not tripled. (thinking / text / tool_use blocks of one turn.)
-        usage = dict(input_tokens=10, output_tokens=40, cache_creation=20, cache_read=30)
+        usage = dict(input_tokens=10, output_tokens=40,
+                     cache_creation=20, cache_read=30)
         records = [
             assistant("msg_multi", **usage),
             assistant("msg_multi", **usage),

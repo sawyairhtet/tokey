@@ -12,15 +12,13 @@ none of it:
 - :class:`SessionCache` holds summaries across calls so a non-active session
   is re-parsed only when its ``(mtime, size)`` changes.
 
-Project-name note: the current single-session discovery
-(:func:`cc_token_tracker.reader.find_active_transcript`) performs NO decoding
-of project directory names -- it resolves paths only, and the renderer shows
-just the transcript file basename. "Decoded identically to current discovery"
-therefore means the project directory name is carried VERBATIM (e.g.
+Project-name note: discovery performs NO decoding of project directory names --
+it resolves paths only. The project directory name is carried VERBATIM (e.g.
 ``-home-saulyehtet-cc-tracker``); no dash-to-slash reconstruction is attempted,
-because that decoding does not exist anywhere today and would be lossy to
-invent (dashes from path separators and dashes/spaces in real directory names
-are indistinguishable).
+because it would be lossy to invent (dashes from path separators and
+dashes/spaces in real directory names are indistinguishable). The roster
+therefore titles a block from the transcript's real ``cwd`` when it has one, and
+falls back to this verbatim name only when it does not.
 
 Context note: the ``context_used`` / ``context_limit`` / ``context_percent``
 fields are the :func:`cc_token_tracker.context.estimate_context` estimate --
@@ -28,11 +26,12 @@ the last prompt's input-side token total against the documented window of that
 record's model. An unknown model or a transcript with no usage-bearing
 assistant record yields ``None`` fields, never a fabricated limit or a fake 0.
 
-Dollar-cost semantics are EXACTLY the existing session total's: each turn is
-priced by its own model and the dollars summed; an unpriceable token-bearing
-turn is left out of the sum and flips ``unpriced``; a zero-token in-flight turn
-never flips it. This is guaranteed by calling the same frozen helper the panel
-uses (``display._session_cost``), not by reimplementing the rules here.
+Dollar-cost semantics are EXACTLY the pipeline's: each turn is priced by its own
+model and the dollars summed; an unpriceable token-bearing turn is left out of
+the sum and flips ``unpriced``; a zero-token in-flight turn never flips it. This
+is guaranteed by calling the one frozen helper that owns those rules
+(:func:`cc_token_tracker.turn_cost.session_cost`), not by reimplementing them
+here.
 """
 
 from __future__ import annotations
@@ -44,23 +43,24 @@ from dataclasses import dataclass, replace
 from cc_token_tracker import liveness
 from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.context import estimate_context
-from cc_token_tracker.display import _session_cost, _turn_usd
 from cc_token_tracker.markers import OPEN, MarkerInfo, read_markers
 from cc_token_tracker.reader import read_transcript
 from cc_token_tracker.segmentation import segment_turns
-from cc_token_tracker.turn_cost import turn_costs
+from cc_token_tracker.turn_cost import TurnCost, session_cost, turn_costs, turn_usd
 
 __all__ = [
     "DEFAULT_WINDOW_DAYS",
+    "SessionCache",
     "SessionRecord",
     "SessionSummary",
     "discover_sessions",
     "summarize_session",
-    "SessionCache",
 ]
 
 # Transcripts whose mtime is older than this many days are excluded from
-# discovery. One knob; discover_sessions takes it as a parameter.
+# discovery. One knob; discover_sessions takes it as a parameter. The marker
+# store's TTL matches it (``markers.MARKER_TTL_SECONDS``, test-guarded), so a
+# session that ages out of discovery also stops leaving a marker file behind.
 DEFAULT_WINDOW_DAYS = 7.0
 
 _SECONDS_PER_DAY = 86400.0
@@ -70,10 +70,9 @@ _SECONDS_PER_DAY = 86400.0
 class SessionRecord:
     """One discovered transcript: where it is, whose project, how fresh.
 
-    ``project`` is the project directory name verbatim (current discovery
-    decodes nothing; see the module docstring). ``mtime`` is the file's
-    modification time at scan, the same recency signal
-    ``find_active_transcript`` uses.
+    ``project`` is the project directory name verbatim (discovery decodes
+    nothing; see the module docstring). ``mtime`` is the file's modification
+    time at scan, which is also the roster's recency and liveness signal.
     """
 
     path: str
@@ -108,24 +107,23 @@ class SessionSummary:
 
     The four ``last_*`` fields are this session's most recent turn -- the
     in-flight one once it has started streaming usage, otherwise the last
-    completed turn (see :func:`summarize_session`) -- the presentation data for
-    the all-expanded roster block's ``Last Prompt:`` line, which therefore updates live
-    while a prompt runs. Every session (not just the auto-followed one) renders
-    its own block, so each carries its own figures straight from the parse rather
-    than from a single live ``Frame``. They reuse the frozen pricing/turn output
-    verbatim: ``last_input_tokens`` folds cache-creation into input just like the
-    hero's IN cell, ``last_output_tokens`` is the turn's output,
-    ``last_cache_read_tokens`` its cache-read, and ``last_cost_usd`` comes from
-    :func:`cc_token_tracker.display._turn_usd` (``None`` when the model is
+    completed turn (see :func:`_pick_last_turn`) -- the presentation data for the
+    roster block's ``Last Prompt:`` line, which therefore updates live while a
+    prompt runs. Every session renders its own block, so each carries its own
+    figures straight from its own parse. They reuse the frozen pricing/turn
+    output verbatim: ``last_input_tokens`` folds cache-creation into input,
+    ``last_output_tokens`` is the turn's output, ``last_cache_read_tokens`` its
+    cache-read, and ``last_cost_usd`` comes from
+    :func:`cc_token_tracker.turn_cost.turn_usd` (``None`` when the model is
     unpriceable). All four are ``None`` when the transcript has no usable turn
     yet, which the renderer shows honestly.
 
     The three ``sum_*`` fields are the SESSION-WIDE totals for the roster block's
-    ``Total:`` line, broken down the same way ``Last Prompt:`` is: ``sum_input_tokens``
-    folds cache-creation into input, ``sum_output_tokens`` is total output, and
-    ``sum_cache_read_tokens`` is total cache-read, all from the one
-    ``account_usage`` pass over the whole transcript. The matching dollar figure
-    is ``total_cost_usd`` (with ``unpriced`` flagging a partial total).
+    ``Total:`` line, broken down the same way ``Last Prompt:`` is:
+    ``sum_input_tokens`` folds cache-creation into input, ``sum_output_tokens``
+    is total output, and ``sum_cache_read_tokens`` is total cache-read, all from
+    the one ``account_usage`` pass over the whole transcript. The matching dollar
+    figure is ``total_cost_usd`` (with ``unpriced`` flagging a partial total).
 
     ``marker_event`` / ``marker_ts`` carry this session's latest hook marker
     (:mod:`cc_token_tracker.markers`) -- ``"SessionStart"``/``"SessionEnd"`` and
@@ -179,8 +177,8 @@ def discover_sessions(
     older than ``window_days`` days before ``now`` (default: the current time)
     are excluded. A missing or unlistable projects dir yields ``[]``, and any
     per-entry filesystem failure (a file vanishing mid-scan, a permission
-    error) skips that entry -- the same never-crash posture as
-    ``find_active_transcript``. Ties on mtime sort by path for determinism.
+    error) skips that entry rather than crashing the scan. Ties on mtime sort
+    by path for determinism.
     """
     if projects_dir is None:
         projects_dir = os.path.expanduser("~/.claude/projects")
@@ -218,6 +216,24 @@ def discover_sessions(
     return records
 
 
+def _pick_last_turn(costs: list[TurnCost]) -> TurnCost | None:
+    """The turn the block's ``Last Prompt:`` line describes, or ``None``.
+
+    Prefers the TRAILING turn once it carries usage -- that is the in-flight turn
+    while a prompt runs, so the line updates live as records stream rather than
+    only when the turn completes. When the tail is just a typed prompt with no
+    usage yet (``turn_total == 0``), falls back to the last COMPLETED turn so an
+    idle prompt does not blank the line with zeros. ``None`` when the transcript
+    has produced no usable turn at all.
+    """
+    if not costs:
+        return None
+    trailing = costs[-1]
+    if trailing.turn_total > 0:
+        return trailing
+    return next((cost for cost in reversed(costs) if cost.complete), None)
+
+
 def summarize_session(path: str, *, is_active: bool = False) -> SessionSummary | None:
     """Full-parse one transcript into a :class:`SessionSummary`, or ``None``.
 
@@ -244,38 +260,25 @@ def summarize_session(path: str, *, is_active: bool = False) -> SessionSummary |
 
     accounting = account_usage(result.records)
     costs = turn_costs(segment_turns(result.records))
-    total_cost_usd, unpriced = _session_cost(costs)
+    total_cost_usd, unpriced = session_cost(costs)
     estimate = estimate_context(result.records)
 
-    # The session's most recent turn, for the roster block's "Last Prompt:" line. We
-    # prefer the TRAILING turn once it carries usage -- that is the in-flight
-    # turn while a prompt runs, so "Last Prompt:" updates live as records stream rather
-    # than only when the turn completes. When the tail is just a typed prompt
-    # with no usage yet (turn_total == 0), we fall back to the last completed
-    # turn so an idle prompt does not blank the line with zeros. Reads the frozen
-    # turn output and prices via the frozen table; folds cache-creation into
-    # input exactly like the hero's IN cell.
-    last = None
-    if costs:
-        trailing = costs[-1]
-        if trailing.turn_total > 0:
-            last = trailing
-        else:
-            last = next((cost for cost in reversed(costs) if cost.complete), None)
+    # The "Last Prompt:" figures. Read off the frozen turn output and priced via
+    # the frozen table; IN folds cache-creation into input.
+    last = _pick_last_turn(costs)
     if last is not None:
         last_input_tokens = last.input_tokens + last.cache_creation_input_tokens
         last_output_tokens = last.output_tokens
         last_cache_read_tokens = last.cache_read_input_tokens
-        last_cost_usd = _turn_usd(last)
+        last_cost_usd = turn_usd(last)
     else:
         last_cost_usd = last_input_tokens = None
         last_output_tokens = last_cache_read_tokens = None
 
-    # Session-wide totals for the "Total:" line, broken down like "Last Prompt:": IN folds
-    # cache-creation into input, from the one account_usage pass above.
+    # Session-wide totals for the "Total:" line, broken down like "Last Prompt:":
+    # IN folds cache-creation into input, from the one account_usage pass above.
     sum_input_tokens = (
-        accounting.total_input_tokens
-        + accounting.total_cache_creation_input_tokens
+        accounting.total_input_tokens + accounting.total_cache_creation_input_tokens
     )
 
     # The session's real working directory, from the first record that carries
@@ -459,9 +462,7 @@ class SessionCache:
                 active_recency = score
                 active_path = path
 
-        ordered = sorted(
-            built, key=lambda item: (-recency(*item), item[0])
-        )
+        ordered = sorted(built, key=lambda item: (-recency(*item), item[0]))
         result: list[SessionSummary] = []
         for path, summary in ordered:
             marker = markers.get(path)

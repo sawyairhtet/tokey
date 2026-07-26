@@ -1,25 +1,24 @@
-"""Multi-session roster view: the v0.6 all-expanded tokey screen.
+"""Multi-session roster view: tokey's one and only screen.
 
 One panel, one compact block per live session, newest first (7-day window).
-Every block stacks the same four-part shape, so a newly-started session just
-adds another block:
+Every block stacks the same shape, so a newly-started session just adds another
+block:
 
     ▶ my-api-server                                            active
       73% ·· ████████░░░ · ~27k left                        opus-4-8
       Last Prompt: $0.142 · IN 12.4k · OUT 3.2k · CACHE 8.1k
+      Total: $4.021 · IN 240.6k · OUT 61.0k · CACHE 1980.4k
 
-The ``▶`` marks the auto-followed session (the newest transcript, exactly like
-the v0.3+ auto-follow); the right-hand label is the session's liveness state.
-The block is summary-driven: every figure comes from the per-session
-:class:`cc_token_tracker.sessions.SessionSummary`, including the ``Last Prompt:``
-line (the session's most recent completed turn). There is no live ``Frame`` in this
-view and no keyboard input.
+The ``▶`` marks the auto-followed session (the newest transcript); the
+right-hand label is the session's liveness state. The block is summary-driven:
+every figure comes from the per-session
+:class:`cc_token_tracker.sessions.SessionSummary`, so nothing here recomputes a
+token or a dollar. There is no keyboard input.
 
-Liveness scope (v0.6.0): each block carries an active/closing/dropped label from
-its transcript mtime (:mod:`cc_token_tracker.liveness`). Dropped sessions leave
-the roster; the header counts the live ("active") ones only; closing sessions
-stay visible but uncounted. The footer total is ACTIVE-ONLY, the same scope as
-the header count.
+Liveness scope: each block carries an active/closing/dropped label
+(:mod:`cc_token_tracker.liveness`). Dropped sessions leave the roster; the
+header counts the live ("active") ones only; closing sessions stay visible but
+uncounted. The footer total is ACTIVE-ONLY, the same scope as the header count.
 
 Honesty markers carried into every block:
 - LAST cost: ``$?`` when the last turn's model is unpriceable; ``no completed
@@ -34,6 +33,7 @@ Honesty markers carried into every block:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -43,7 +43,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 
 from rich import box
-from rich.align import Align
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.padding import Padding
@@ -54,7 +53,6 @@ from rich.text import Text
 
 from cc_token_tracker import __version__
 from cc_token_tracker import mood as _mood
-from cc_token_tracker.display import _ACCENT, MAX_PANEL_WIDTH
 from cc_token_tracker.liveness import ACTIVE, DROPPED, classify_with_marker
 from cc_token_tracker.pricing import normalize_model
 from cc_token_tracker.sessions import SessionCache, SessionSummary
@@ -67,19 +65,29 @@ from cc_token_tracker.usage import (
 )
 
 __all__ = [
+    "MAX_PANEL_WIDTH",
     "ROSTER_LIMIT",
     "RosterView",
     "account_usage_requested",
     "build_roster_view",
+    "main",
     "mood_enabled",
     "percent_figure",
     "render_roster",
     "run",
-    "main",
     "version_requested",
 ]
 
 _LOG = logging.getLogger(__name__)
+
+# The one accent colour: the ▶ auto-follow marker and the "tokey" title. Every
+# other colour in the panel is a gauge tint, so this reads as the app's own.
+_ACCENT = "cyan"
+
+# Upper bound on the rendered panel width. On a narrow terminal the panel uses
+# the full width; on a wide one it caps here instead of stretching edge to edge.
+# One knob. The impure console-width read lives in run, not in the renderers.
+MAX_PANEL_WIDTH = 100
 
 # At most this many session blocks render; overflow becomes a "+N more" line
 # above the footer. The footer total still covers every active session.
@@ -184,6 +192,62 @@ def _k(tokens: int) -> str:
     return f"{tokens / 1000:.1f}k"
 
 
+def _left_right_grid() -> Table:
+    """A full-width two-column grid: left cell takes the slack, right cell hugs.
+
+    The panel's recurring layout (header, context row, footer totals), in one
+    place so every row shares the same edges and a change lands everywhere.
+    """
+    grid = Table.grid(expand=True)
+    grid.add_column(justify="left", ratio=1)
+    grid.add_column(justify="right")
+    return grid
+
+
+def _bar(percent: float, width: int, color: str) -> Text:
+    """A filled/empty gauge bar for a 0..100 percent, clamped at both ends.
+
+    Both halves are solid blocks: the filled run in ``color``, the remainder in
+    a dark grey, so a bar reads as a row of lit/unlit cells rather than dots.
+    Shared by the per-session context gauge and the account-usage rows, which
+    differ only in width and colour.
+    """
+    filled = round(min(max(percent, 0.0), 100.0) / 100.0 * width)
+    return Text("█" * filled, style=color) + Text(
+        "█" * (width - filled), style=_BAR_EMPTY
+    )
+
+
+def _figures_line(
+    label: str,
+    cost: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+) -> Text:
+    """One ``label: $cost · IN x · OUT y · CACHE z`` line.
+
+    Shared by the block's ``Last Prompt:`` and ``Total:`` rows, which differ only
+    in their label, how the dollar figure is formatted, and which totals they
+    read. CACHE is omitted entirely when the cache-read count is zero, so a turn
+    or session that read no cache stays silent rather than showing a bare
+    ``0.0k``.
+    """
+    parts: list = [
+        (f"{label}: ", "dim"),
+        (cost, ""),
+        (" · ", "dim"),
+        (f"IN {_k(input_tokens)}", ""),
+        (" · ", "dim"),
+        (f"OUT {_k(output_tokens)}", ""),
+    ]
+    if cache_read_tokens > 0:
+        parts.append((" · ", "dim"))
+        parts.append((f"CACHE {_k(cache_read_tokens)}", ""))
+    return Text.assemble(*parts)
+
+
 def _header(active_count: int, interval: float, plan: str | None = None) -> Table:
     """Top line: ``tokey`` left, ``N active session(s) · [interval]`` right.
 
@@ -191,9 +255,7 @@ def _header(active_count: int, interval: float, plan: str | None = None) -> Tabl
     subscription badge is appended: ``... · Pro Plan``. With no plan the line is
     byte-identical to before, so the default install is unchanged.
     """
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="left", ratio=1)
-    grid.add_column(justify="right")
+    grid = _left_right_grid()
     plural = "" if active_count == 1 else "s"
     parts: list = [
         (f"{active_count} active session{plural}", "dim"),
@@ -217,15 +279,13 @@ def _context_line(summary: SessionSummary) -> Text:
     percent = summary.context_percent
     if percent is None:
         return Text("context limit unknown for this model", style="dim")
-    filled = round(min(percent, 100.0) / 100.0 * _BAR_WIDTH)
-    bar = (
-        Text("█" * filled, style=_CONTEXT_COLOR)
-        + Text("█" * (_BAR_WIDTH - filled), style=_BAR_EMPTY)
-    )
-    remaining_k = max(0, (summary.context_limit or 0) - (summary.context_used or 0)) // 1000
+    remaining = (summary.context_limit or 0) - (summary.context_used or 0)
+    remaining_k = max(0, remaining) // 1000
     return (
-        Text.assemble((percent_figure(percent), f"bold {_CONTEXT_COLOR}"), (" ·· ", "dim"))
-        + bar
+        Text.assemble(
+            (percent_figure(percent), f"bold {_CONTEXT_COLOR}"), (" ·· ", "dim")
+        )
+        + _bar(percent, _BAR_WIDTH, _CONTEXT_COLOR)
         + Text.assemble((" · ", "dim"), (f"~{remaining_k}k left", "dim"))
     )
 
@@ -239,12 +299,10 @@ def _context_model_label(model: str | None) -> str:
     rendering a blank cell."""
     if not model:
         return ""
-    label = normalize_model(model)
-    prefix = "claude-"
-    return label[len(prefix):] if label.startswith(prefix) else label
+    return normalize_model(model).removeprefix("claude-")
 
 
-def _context_row(summary: SessionSummary):
+def _context_row(summary: SessionSummary) -> RenderableType:
     """The context gauge plus, right-aligned under the header's liveness label,
     the model the window belongs to.
 
@@ -256,9 +314,10 @@ def _context_row(summary: SessionSummary):
     label = _context_model_label(summary.context_model)
     if not label:
         return gauge
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="left", ratio=1, overflow="ellipsis", no_wrap=True)
-    grid.add_column(justify="right", no_wrap=True)
+    grid = _left_right_grid()
+    grid.columns[0].overflow = "ellipsis"
+    grid.columns[0].no_wrap = True
+    grid.columns[1].no_wrap = True
     grid.add_row(gauge, Text(label, style="dim"))
     return grid
 
@@ -268,24 +327,20 @@ def _last_line(summary: SessionSummary) -> Text:
 
     ``$?`` when that turn's model is unpriceable; ``no completed turn yet`` when
     the transcript has finished none. ``CACHE`` is shown only when the turn read
-    cache (non-zero), matching the single-session hero's cache cell otherwise
-    staying silent. IN folds cache-creation into input (done in the summary).
+    cache (non-zero). IN folds cache-creation into input (done in the summary).
     """
     if summary.last_output_tokens is None:
-        return Text.assemble(("Last Prompt: ", "dim"), ("no completed turn yet", "dim italic"))
+        return Text.assemble(
+            ("Last Prompt: ", "dim"), ("no completed turn yet", "dim italic")
+        )
     cost = "$?" if summary.last_cost_usd is None else f"${summary.last_cost_usd:.3f}"
-    parts: list = [
-        ("Last Prompt: ", "dim"),
-        (cost, ""),
-        (" · ", "dim"),
-        (f"IN {_k(summary.last_input_tokens or 0)}", ""),
-        (" · ", "dim"),
-        (f"OUT {_k(summary.last_output_tokens)}", ""),
-    ]
-    if (summary.last_cache_read_tokens or 0) > 0:
-        parts.append((" · ", "dim"))
-        parts.append((f"CACHE {_k(summary.last_cache_read_tokens)}", ""))
-    return Text.assemble(*parts)
+    return _figures_line(
+        "Last Prompt",
+        cost,
+        input_tokens=summary.last_input_tokens or 0,
+        output_tokens=summary.last_output_tokens,
+        cache_read_tokens=summary.last_cache_read_tokens or 0,
+    )
 
 
 def _sum_line(summary: SessionSummary) -> Text:
@@ -295,24 +350,17 @@ def _sum_line(summary: SessionSummary) -> Text:
     The dollars are the session total (each turn priced by its own model, then
     summed); a ``+`` suffix (``$1.234+``) flags a PARTIAL total when some
     token-bearing turn was unpriceable, matching the footer's ``(+ unpriced)``.
-    IN folds cache-creation into input; CACHE shows only when the session read
-    cache (non-zero), exactly like ``Last Prompt:``.
     """
     cost = f"${summary.total_cost_usd:.3f}"
     if summary.unpriced:
         cost += "+"
-    parts: list = [
-        ("Total: ", "dim"),
-        (cost, ""),
-        (" · ", "dim"),
-        (f"IN {_k(summary.sum_input_tokens)}", ""),
-        (" · ", "dim"),
-        (f"OUT {_k(summary.sum_output_tokens)}", ""),
-    ]
-    if summary.sum_cache_read_tokens > 0:
-        parts.append((" · ", "dim"))
-        parts.append((f"CACHE {_k(summary.sum_cache_read_tokens)}", ""))
-    return Text.assemble(*parts)
+    return _figures_line(
+        "Total",
+        cost,
+        input_tokens=summary.sum_input_tokens,
+        output_tokens=summary.sum_output_tokens,
+        cache_read_tokens=summary.sum_cache_read_tokens,
+    )
 
 
 def _project_title(summary: SessionSummary) -> str:
@@ -363,21 +411,6 @@ def _session_block(summary: SessionSummary) -> Group:
     return Group(head, body)
 
 
-def _usage_bar(percent: float, color: str) -> Text:
-    """A filled/empty bar for a 0..100 usage percent, clamped at a full bar.
-
-    Both halves are solid blocks: the filled run in ``color``, the remainder in a
-    dark grey, so the bar reads as a row of lit/unlit cells (the mockup look)
-    rather than dots. A distinct ``color`` per row keeps stacked bars from
-    merging into one block.
-    """
-    filled = round(min(max(percent, 0.0), 100.0) / 100.0 * _USAGE_BAR_WIDTH)
-    return (
-        Text("█" * filled, style=color)
-        + Text("█" * (_USAGE_BAR_WIDTH - filled), style=_BAR_EMPTY)
-    )
-
-
 def _reset_text(resets_at: float | None, now: float) -> str:
     """A window's reset time, phrased like the Claude Usage panel.
 
@@ -398,23 +431,25 @@ def _reset_text(resets_at: float | None, now: float) -> str:
     return "resets " + datetime.fromtimestamp(resets_at).strftime("%a %H:%M")
 
 
-def _usage_row(label: str, window: UsageWindow, now: float, color: str) -> tuple:
+def _usage_row(
+    label: str, window: UsageWindow, now: float, color: str
+) -> tuple[Text, Text, Text, Text]:
     """One labelled usage bar row: label · bar · percent · reset.
 
-    ``color`` is the row's fixed accent (Session yellow, Weekly blue, matching
-    the mockup); the bar and percent share it. The right cell is the real reset
-    time -- the subscription windows are percentages only, so no dollar figure is
-    placed here.
+    ``color`` is the row's fixed accent (Session yellow, Weekly blue); the bar
+    and percent share it. The right cell is the real reset time -- the
+    subscription windows are percentages only, so no dollar figure is placed
+    here.
     """
     return (
         Text(label, style="bold"),
-        _usage_bar(window.utilization, color),
+        _bar(window.utilization, _USAGE_BAR_WIDTH, color),
         Text(f"{round(window.utilization)}%", style=f"bold {color}"),
         Text(_reset_text(window.resets_at, now), style="dim"),
     )
 
 
-def _credits_row(credits: Credits) -> tuple:
+def _credits_row(credits: Credits) -> tuple[Text, Text, Text, Text]:
     """The usage-credits row: the one place real dollars belong.
 
     The percent is the reported utilization, or used/limit when the endpoint
@@ -440,7 +475,7 @@ def _credits_row(credits: Credits) -> tuple:
     )
     return (
         Text("Usage credits", style="bold"),
-        _usage_bar(percent, _CREDITS_COLOR),
+        _bar(percent, _USAGE_BAR_WIDTH, _CREDITS_COLOR),
         Text(f"{round(percent)}%", style=f"bold {_CREDITS_COLOR}"),
         Text(amount, style="dim"),
     )
@@ -456,17 +491,17 @@ def _account_block(usage: AccountUsage, now: float) -> Group | None:
     percentages only). Returns None when no row qualifies, so the caller can omit
     the block and its divider entirely.
     """
-    rows: list[tuple] = []
-    if usage.session is not None:
-        rows.append(_usage_row("Session limit", usage.session, now, _SESSION_COLOR))
-    if usage.weekly is not None:
-        rows.append(_usage_row("Weekly limit", usage.weekly, now, _WEEKLY_COLOR))
-    if usage.weekly_opus is not None:
-        rows.append(_usage_row("Weekly (Opus)", usage.weekly_opus, now, _WEEKLY_COLOR))
-    if usage.weekly_sonnet is not None:
-        rows.append(
-            _usage_row("Weekly (Sonnet)", usage.weekly_sonnet, now, _WEEKLY_COLOR)
-        )
+    windows = (
+        ("Session limit", usage.session, _SESSION_COLOR),
+        ("Weekly limit", usage.weekly, _WEEKLY_COLOR),
+        ("Weekly (Opus)", usage.weekly_opus, _WEEKLY_COLOR),
+        ("Weekly (Sonnet)", usage.weekly_sonnet, _WEEKLY_COLOR),
+    )
+    rows: list[tuple[Text, Text, Text, Text]] = [
+        _usage_row(label, window, now, color)
+        for label, window, color in windows
+        if window is not None
+    ]
     if usage.credits is not None and usage.credits.enabled:
         rows.append(_credits_row(usage.credits))
     if not rows:
@@ -497,34 +532,25 @@ def _footer(
 
     With ``mood`` on (the default) a white speech bubble and the light-blue
     Baymax head beneath it are parked on the right, above the totals line (see
-    :mod:`cc_token_tracker.mood`); ``now``/``width`` drive the lockstep rotation
-    and the bubble fit. With ``mood`` off the footer is exactly
-    the plain totals line."""
-    total_cost = sum(s.total_cost_usd for s in active)
-    total_tokens = sum(s.total_tokens for s in active)
+    :func:`cc_token_tracker.mood.render_mood`, which owns that stack);
+    ``now``/``width`` drive the lockstep rotation and the bubble fit. With
+    ``mood`` off the footer is exactly the plain totals line."""
+    total_cost = sum(summary.total_cost_usd for summary in active)
+    total_tokens = sum(summary.total_tokens for summary in active)
     left = Text(f"active: ${total_cost:.3f} · {_k(total_tokens)} tok", style="bold")
-    if any(s.unpriced for s in active):
+    if any(summary.unpriced for summary in active):
         left.append("  (+ unpriced)", style="yellow")
-    if not mood:
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="left", ratio=1)
-        grid.add_column(justify="right")
-        grid.add_row(left, Text(""))
-        return grid
 
+    totals = _left_right_grid()
+    totals.add_row(left, Text(""))
+    if not mood:
+        return totals
     if now is None:
         now = time.time()
-    panel_width = width if width is not None else MAX_PANEL_WIDTH
-    working = _mood.is_working(active, now)
-    bubble = _mood.render_bubble(_mood.pick(now)[1], panel_width)
-    face = _mood.face_text(working, now)
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="left", ratio=1)  # active total (left)
-    grid.add_column(justify="right")  # spacer
-    grid.add_row(left, Text(""))
     # Bubble parked top-right, the big face right beneath its tail, the total
     # on its own line bottom-left.
-    return Group(Align.right(bubble), Align.right(face), grid)
+    panel_width = width if width is not None else MAX_PANEL_WIDTH
+    return Group(_mood.render_mood(active, now, panel_width), totals)
 
 
 def render_roster(
@@ -585,7 +611,7 @@ def render_roster(
         items.append(Text("no sessions in the last 7 days", style="dim italic"))
         items.append(Rule(style="dim"))
 
-    active_sessions = [s for s in roster if s.state == ACTIVE]
+    active_sessions = [summary for summary in roster if summary.state == ACTIVE]
     items.append(_footer(active_sessions, now=now, width=width, mood=mood))
 
     return Panel(
@@ -594,6 +620,29 @@ def render_roster(
         padding=(1, 2),
         width=width,
     )
+
+
+def _start_usage_refresher(provider: UsageProvider) -> threading.Event:
+    """Drive ``provider`` from a daemon thread; return its stop signal.
+
+    Account usage is fetched OFF the render path: this thread refreshes on an
+    interval while each tick reads ``provider.current()`` instantly, so a slow or
+    hung endpoint never stalls the panel. The first fetch runs immediately, so
+    the block appears as soon as it lands. A disabled provider starts no thread
+    at all, which is what makes the default install cost nothing: no credential
+    read, no network call. Setting the returned event ends the thread.
+    """
+    stop = threading.Event()
+    if not provider.enabled:
+        return stop
+
+    def refresh_loop() -> None:
+        provider.refresh()
+        while not stop.wait(USAGE_REFRESH_SECONDS):
+            provider.refresh()
+
+    threading.Thread(target=refresh_loop, name="tokey-usage", daemon=True).start()
+    return stop
 
 
 def run(
@@ -619,24 +668,10 @@ def run(
     cache = SessionCache()
     console = Console()
     provider = UsageProvider(enabled=account_usage)
-    stop = threading.Event()
-    if provider.enabled:
-        # Account usage is fetched off the render path: a daemon thread refreshes
-        # the provider on an interval while each tick reads provider.current()
-        # instantly, so a slow endpoint never stalls the panel. First fetch runs
-        # at once; the block appears as soon as it lands.
-        def _refresh_loop() -> None:
-            provider.refresh()
-            while not stop.wait(USAGE_REFRESH_SECONDS):
-                provider.refresh()
-
-        threading.Thread(
-            target=_refresh_loop, name="tokey-usage", daemon=True
-        ).start()
+    stop = _start_usage_refresher(provider)
 
     try:
         with Live(console=console, auto_refresh=False, screen=False) as live:
-            summaries: list[SessionSummary] = []
             while True:
                 try:
                     summaries = cache.summaries()
@@ -655,7 +690,7 @@ def run(
                         ),
                         refresh=True,
                     )
-                except Exception:  # noqa: BLE001 - one bad tick must not kill us
+                except Exception:  # deliberately bare: one bad tick must not kill us
                     _LOG.exception("roster tick failed; continuing")
                 time.sleep(interval)
     except KeyboardInterrupt:
@@ -714,10 +749,8 @@ def main(argv: list[str] | None = None) -> int:
     # (e.g. a test harness replacing it with a buffer).
     encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
     if encoding != "utf8":
-        try:
+        with contextlib.suppress(AttributeError, ValueError):
             sys.stdout.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):
-            pass
     return run(
         account_usage=account_usage_requested(argv),
         mood=mood_enabled(argv),

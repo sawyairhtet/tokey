@@ -28,6 +28,13 @@ echo.
 %PYCMD% -m pip install "%~dp0."
 if errorlevel 1 goto install_failed
 
+REM Prove the install actually took before promising the user it worked: pip can
+REM report success while the package lands somewhere this Python cannot import
+REM (a mismatched launcher, a broken user-site). Fail loudly here instead of
+REM leaving a Desktop launcher that dies on the first double-click.
+%PYCMD% -c "import cc_token_tracker" >nul 2>nul
+if errorlevel 1 goto verify_failed
+
 REM Tokey is now copied into Python, so this folder is no longer needed. Drop a
 REM standalone launcher on the Desktop so it can still be started after the
 REM folder is deleted (PowerShell resolves the real Desktop, OneDrive included).
@@ -72,6 +79,18 @@ exit /b 1
 :install_failed
 echo.
 echo [ X ]  Install failed. Scroll up to read the error message.
+echo.
+pause
+exit /b 1
+
+:verify_failed
+echo.
+echo [ X ]  Install reported success, but tokey cannot be imported by:
+%PYCMD% --version
+echo.
+echo        This usually means more than one Python is installed and pip put
+echo        tokey in a different one. Try again from a terminal with:
+echo            py -3 -m pip install "%~dp0."
 echo.
 pause
 exit /b 1

@@ -13,13 +13,16 @@ import re
 
 __all__ = ["normalize_model", "turn_cost_usd"]
 
-# prices as of 2026-07-01, source: platform.claude.com/docs/en/about-claude/pricing
+# prices as of 2026-07-26, source: platform.claude.com/docs/en/about-claude/pricing
 # cache_write uses the 5-minute TTL multiplier (1.25x input); 1-hour cache
 # writes are billed higher, so turns carrying 1h-TTL writes would undercount.
 # Rates are dollars per million tokens.
 _RATES_PER_MTOK: dict[str, dict[str, float]] = {
     "claude-fable-5": {
         "input": 10.00, "output": 50.00, "cache_write": 12.50, "cache_read": 1.00,
+    },
+    "claude-opus-5": {
+        "input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50,
     },
     "claude-opus-4-8": {
         "input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50,

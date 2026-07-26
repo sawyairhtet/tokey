@@ -21,6 +21,7 @@ parse reasons; a bad marker is skipped, a failed write returns False.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -28,13 +29,14 @@ import time
 from dataclasses import dataclass
 
 __all__ = [
-    "DEFAULT_MARKERS_DIR",
-    "OPEN",
     "CLOSED",
+    "DEFAULT_MARKERS_DIR",
     "MARKER_STALE_AFTER_SECONDS",
+    "MARKER_TTL_SECONDS",
+    "OPEN",
     "MarkerInfo",
-    "write_marker",
     "read_markers",
+    "write_marker",
 ]
 
 # Where the hooks write and the roster reads. Under the tracker base dir the
@@ -53,9 +55,13 @@ CLOSED = "SessionEnd"
 # this bound; this only keeps a crashed session's marker from lingering forever.
 MARKER_STALE_AFTER_SECONDS = 2 * 3600.0
 
-# Closed tombstones older than this are unlinked on read so the dir does not grow
-# without bound. Matches the roster's 7-day discovery window.
-_TOMBSTONE_TTL_SECONDS = 7 * 86400.0
+# Markers older than this are unlinked on read so the dir does not grow without
+# bound. It applies to BOTH events: a closed tombstone has long since done its
+# job, and an OPEN marker this old belongs to a session that crashed a week ago
+# (MARKER_STALE_AFTER_SECONDS declared it dropped hours in). Matches the roster's
+# 7-day discovery window (``sessions.DEFAULT_WINDOW_DAYS``, test-guarded), past
+# which a session is invisible anyway.
+MARKER_TTL_SECONDS = 7 * 86400.0
 
 
 @dataclass(frozen=True)
@@ -126,22 +132,18 @@ def write_marker(
         return True
     except OSError:
         if fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
         if temp_path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temp_path)
-            except OSError:
-                pass
         return False
 
 
 def _parse_marker(path: str) -> MarkerInfo | None:
     """Read and validate one marker file, or None if unusable. Never raises."""
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             blob = json.load(handle)
     except (OSError, ValueError):
         return None
@@ -176,9 +178,9 @@ def read_markers(
     files are skipped. Returns a dict from ``transcript_path`` to its
     :class:`MarkerInfo` so the roster can match a marker to a discovered session
     in O(1); when two markers name the same transcript the newest ``ts`` wins.
-    Closed tombstones older than the 7-day window are unlinked as dir hygiene
-    (best-effort; an unlink failure is ignored). A missing markers dir yields an
-    empty dict.
+    Markers of either event older than :data:`MARKER_TTL_SECONDS` are unlinked as
+    dir hygiene (best-effort; an unlink failure is ignored). A missing markers
+    dir yields an empty dict.
     """
     if markers_dir is None:
         markers_dir = DEFAULT_MARKERS_DIR
@@ -197,11 +199,9 @@ def read_markers(
         marker = _parse_marker(path)
         if marker is None:
             continue
-        if marker.event == CLOSED and now - marker.ts > _TOMBSTONE_TTL_SECONDS:
-            try:
+        if now - marker.ts > MARKER_TTL_SECONDS:
+            with contextlib.suppress(OSError):
                 os.unlink(path)
-            except OSError:
-                pass
             continue
         existing = by_path.get(marker.transcript_path)
         if existing is None or marker.ts >= existing.ts:

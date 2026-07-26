@@ -8,11 +8,69 @@ All notable changes to this project are documented here.
 - **`tokey --version` (`-V`)**: prints the version and exits without entering
   the render loop. The number is read straight from the package, so it is
   correct regardless of when tokey was last reinstalled.
+- **Pricing and context entries for `claude-opus-5`** (1M context window). Both
+  hand-maintained tables move together, as the per-model tables require.
 
 ### Changed
 - **Version is now single-sourced** from `cc_token_tracker.__version__`;
   `pyproject.toml` derives it via setuptools' dynamic-version `attr`, so a
   release bumps the number in one place instead of two.
+- **The two per-turn dollar helpers moved to `turn_cost.py`** and are now public
+  (`turn_usd`, `session_cost`). They previously lived in the render layer as
+  `display._turn_usd` / `display._session_cost`, which forced `sessions.py` to
+  import from a module further down the render path than itself. Pricing rules
+  are unchanged: each turn is priced by its own model, an unpriceable
+  token-bearing turn is excluded and flips `unpriced`, and a zero-token
+  in-flight turn never flips it.
+- **Lint is enforced, not advisory**: `pyproject.toml` now selects
+  `E,W,F,I,UP,B,SIM,RUF` at 88 columns, which CI already runs as a gate.
+
+### Removed
+- **The single-session panel (`display.py`)** and its 562-line test file. It was
+  superseded as `tokey`'s view by the roster in v0.5.0 and its RECENT strip was
+  dropped product-wide in v0.6.0, leaving roughly 1,100 lines that no entry
+  point could reach: `render_panel`, `compute_frame`, `Frame`, `RecentEntry`,
+  `DisplayState`, the flash state, the model tags, and its own poll loop. The
+  four symbols still in use moved to where they belong (above). `tokey`'s
+  rendered output is byte-identical.
+- **`reader.find_active_transcript`**, the single-session recency resolver, whose
+  only caller was the deleted panel. Discovery has run through
+  `sessions.discover_sessions` since v0.5.0.
+- **`mood.CLAUDE_CORAL`**, an unused constant left behind when the footer
+  companion went light blue in v0.7.5.
+- **`graphify-out/` is no longer tracked in git.** It is generated output
+  carrying its own hash-keyed cache; it is now ignored, along with `.ruff_cache/`
+  and `.vscode/`. The files stay on disk.
+
+### Fixed
+- **Malformed transcript scalars could crash a session's panel.** The parser
+  carried `message.id`, `model`, `role` and `stop_reason` through verbatim
+  whatever their JSON type. A non-string `id` (an object or array) reached
+  accounting, where it is used as a dict key, and raised
+  `TypeError: unhashable type` mid-pipeline; a non-string `model` reached
+  pricing's regex and raised there. Both are now coerced to `None` at the parse
+  boundary, matching how token counts and `cwd` were already handled, so the
+  never-raises contract every downstream layer documents actually holds.
+- **The marker store grew without bound.** Only CLOSED tombstones were pruned on
+  read, so a session killed hard (no `SessionEnd`, so no tombstone) left its
+  OPEN marker under `~/.claude/cc_token_tracker/sessions/` forever. Markers of
+  either event are now unlinked past the same 7-day TTL, which matches the
+  roster's discovery window; liveness is unaffected, since a crashed session is
+  already classified dropped after two hours.
+- **Short speech bubbles rendered lopsided.** The footer bubble's bottom border
+  spends three cells on its corners and tail notch, so a phrase one cell wide
+  produced a bottom row wider than its top. The inner width is floored so every
+  row of a bubble is the same width for any phrase.
+- **`run-tokey.bat` reported "Tokey closed" when tokey had failed to start.** It
+  now checks the exit code and points at `setup.bat` when the package is not
+  importable. `setup.bat` additionally verifies the install by importing the
+  package, instead of trusting pip's exit code and leaving a Desktop launcher
+  that dies on first use.
+- **Documentation corrections**: the README claimed the account-usage bars were
+  tinted green/yellow/red by fill level, which they never were (each row has a
+  fixed colour). Em dashes were removed from `README.md` and `CLAUDE.md`, which
+  had been violating the project's own standing rule, and `CLAUDE.md`'s pipeline
+  diagram and money invariant now name the modules that actually exist.
 
 ## [0.7.6] - 2026-06-20
 

@@ -25,7 +25,7 @@ block within a refresh (no restart). Each block is:
   `opus-4-8`), so you can see which model's limit the percentage is against.
 - **Last Prompt**: the session's most recent turn, broken into IN (input plus
   cache creation), OUT, CACHE (cache read, shown only when the turn read cache),
-  and the turn's dollar cost. This updates in real time *while a prompt runs* —
+  and the turn's dollar cost. This updates in real time *while a prompt runs*:
   the in-flight turn's figures climb as the response streams, not only once it
   finishes. An unpriceable model shows `$?`; a session that has not produced a
   turn yet shows `no completed turn yet`.
@@ -61,7 +61,7 @@ the end.
 
 ## Install
 
-**On Windows?** Skip this section — see [Windows quick start](#windows-quick-start-no-terminal-no-path)
+**On Windows?** Skip this section, see [Windows quick start](#windows-quick-start-no-terminal-no-path)
 below for a two-click setup that needs no terminal and no PATH.
 
 Clone the repo, then from inside it:
@@ -79,7 +79,7 @@ reopen the terminal.
 
 ## Windows quick start (no terminal, no PATH)
 
-Setup is two clicks — you never type a command or touch PATH:
+Setup is two clicks, and you never type a command or touch PATH:
 
 1. **Get the code.** On the GitHub page click *Code → Download ZIP*, then
    right-click the downloaded file → *Extract All*.
@@ -87,7 +87,7 @@ Setup is two clicks — you never type a command or touch PATH:
    to the installer if you don't), installs tokey, and puts a **Tokey** launcher
    on your Desktop. Wait for *Done!*, then press a key to close the window.
 3. **Double-click the `Tokey` launcher on your Desktop.** The panel opens in its
-   own window — set it beside your Claude Code window. Press Ctrl-C to quit.
+   own window; set it beside your Claude Code window. Press Ctrl-C to quit.
 
 That's the whole setup. The install copies tokey into Python, so you can delete
 the downloaded folder and still launch from the Desktop. Everything past here is
@@ -102,7 +102,7 @@ The no-PATH way to run is always `py -m cc_token_tracker.roster`.
 To get the bare `tokey` command, add your Python `Scripts` directory to PATH via
 the GUI editor (Win+R → `sysdm.cpl` → *Advanced → Environment Variables* → select
 `Path` → *Edit → New*), then reopen the terminal. Do **not** use
-`setx PATH "%PATH%;..."` — it re-expands `%PATH%`, can fuse user and system PATH
+`setx PATH "%PATH%;..."`: it re-expands `%PATH%`, can fuse user and system PATH
 together, and silently truncates past its length limit (it corrupted a real PATH
 during testing here).
 
@@ -146,7 +146,7 @@ point `pip install -e .` put on your PATH):
 
 The hook writes a tiny per-session marker under `~/.claude/cc_token_tracker/`
 and never prints or blocks. Without the hooks, tokey falls back to the
-transcript-mtime behavior, so this is purely an upgrade — nothing breaks if you
+transcript-mtime behavior, so this is purely an upgrade; nothing breaks if you
 skip it (and Claude Code on Windows, which does not run all hooks the same way,
 just keeps the fallback).
 
@@ -174,12 +174,12 @@ subcommand:
 These windows are an opaque server-side **percentage**, not dollars: there is no
 dollar cap on a subscription, so tokey shows the percent and reset time only.
 (Real dollars appear in one place: the usage-credits add-on, shown only if you
-have enabled it.) The bar is tinted by how close you are to the cap — green,
-then yellow past 50%, red past 80%.
+have enabled it.) Each row has its own fixed colour, so stacked bars stay
+readable as separate gauges rather than merging into one block.
 
-**How it works.** Tokey reads the OAuth token Claude Code already stored — the
+**How it works.** Tokey reads the OAuth token Claude Code already stored (the
 plaintext `~/.claude/.credentials.json` on Linux/WSL, or the login Keychain on
-macOS, where Claude Code keeps it instead of the file — and sends it only to
+macOS, where Claude Code keeps it instead of the file) and sends it only to
 `api.anthropic.com`, the same destination Claude Code uses. The token never
 reaches any third party and tokey never writes to your credential store. The
 macOS lookup shells out to the built-in `security` tool, read-only, so nothing

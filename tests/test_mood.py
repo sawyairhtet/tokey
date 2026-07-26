@@ -49,8 +49,10 @@ class IsWorkingTests(unittest.TestCase):
         self.assertFalse(mood.is_working([s], NOW))
 
     def test_boundary(self):
-        inside = make_summary(last_write=NOW - (mood.ACTIVE_WRITE_WINDOW - 0.1), state=ACTIVE)
-        outside = make_summary(last_write=NOW - (mood.ACTIVE_WRITE_WINDOW + 0.1), state=ACTIVE)
+        inside = make_summary(
+            last_write=NOW - (mood.ACTIVE_WRITE_WINDOW - 0.1), state=ACTIVE)
+        outside = make_summary(
+            last_write=NOW - (mood.ACTIVE_WRITE_WINDOW + 0.1), state=ACTIVE)
         self.assertTrue(mood.is_working([inside], NOW))
         self.assertFalse(mood.is_working([outside], NOW))
 
@@ -162,6 +164,25 @@ class BubbleTests(unittest.TestCase):
         text = mood.render_bubble(mood.MOODS[28][1], 80).plain
         for line in text.split("\n"):
             self.assertLessEqual(cell_len(line), 80)
+
+    def test_every_row_is_the_same_width_for_every_pooled_phrase(self):
+        # The bubble is only readable if its top border, body rows and tail
+        # border all end on the same column. Checked across the whole pool and a
+        # range of panel widths, since the wrap width is derived from the width.
+        for _, phrase in mood.MOODS:
+            for width in (40, 60, 80, 100):
+                rows = mood.render_bubble(phrase, width).plain.split("\n")
+                widths = {cell_len(row) for row in rows}
+                self.assertEqual(len(widths), 1, f"{phrase!r} @ {width}: {widths}")
+
+    def test_short_phrase_still_yields_a_square_bubble(self):
+        # The tail border spends 3 cells on its corners and notch, so a 1-cell
+        # phrase used to render a bottom row one cell wider than the top. The
+        # inner width is floored instead of allowed to go ragged.
+        rows = mood.render_bubble("x", 80).plain.split("\n")
+        self.assertEqual(len({cell_len(row) for row in rows}), 1)
+        self.assertIn("x", rows[1])
+        self.assertIn("┬", rows[-1])  # the tail notch survives the floor
 
 
 class FaceTests(unittest.TestCase):

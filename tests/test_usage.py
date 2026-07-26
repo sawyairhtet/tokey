@@ -122,7 +122,8 @@ class ReadCredentials(unittest.TestCase):
     def test_falls_back_to_keychain_when_no_file(self):
         # macOS: no plaintext file, but the Keychain returns the same JSON blob.
         blob = json.dumps(
-            {"claudeAiOauth": {"accessToken": "from-keychain", "subscriptionType": "pro"}}
+            {"claudeAiOauth": {"accessToken": "from-keychain",
+                               "subscriptionType": "pro"}}
         )
         creds = read_credentials(self.path, keychain_reader=lambda: blob)
         self.assertEqual(creds, Credentials(token="from-keychain", plan="pro"))
@@ -138,7 +139,8 @@ class ReadCredentials(unittest.TestCase):
 
 class ReadMacosKeychain(unittest.TestCase):
     def _completed(self, returncode=0, stdout=""):
-        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout)
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout)
 
     def test_no_op_off_macos(self):
         # Off macOS it returns None without ever invoking the runner.

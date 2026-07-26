@@ -8,4 +8,4 @@ __version__ = "0.7.6"
 
 from cc_token_tracker.parser import TranscriptRecord, Usage, parse_line
 
-__all__ = ["Usage", "TranscriptRecord", "__version__", "parse_line"]
+__all__ = ["TranscriptRecord", "Usage", "__version__", "parse_line"]

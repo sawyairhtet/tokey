@@ -62,7 +62,8 @@ class TurnCosts(unittest.TestCase):
 
     def test_two_turns_costed_independently_in_order(self):
         t1 = Turn(records=[prompt("p1"), assistant("a1", 1, 2, 3, 4)], complete=True)
-        t2 = Turn(records=[prompt("p2"), assistant("a2", 10, 20, 30, 40)], complete=True)
+        t2 = Turn(records=[prompt("p2"), assistant("a2", 10, 20, 30, 40)],
+                  complete=True)
 
         result = turn_costs([t1, t2])
 

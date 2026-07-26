@@ -21,7 +21,7 @@ import sys
 
 from cc_token_tracker.markers import CLOSED, OPEN, write_marker
 
-__all__ = ["run_hook", "main"]
+__all__ = ["main", "run_hook"]
 
 
 def run_hook(stdin_text: str, *, markers_dir: str | None = None) -> bool:
@@ -69,7 +69,7 @@ def main() -> int:
     try:
         text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
         run_hook(text)
-    except Exception:  # noqa: BLE001 - a hook must never raise to Claude Code
+    except Exception:  # deliberately bare: a hook must never raise to Claude Code
         pass
     return 0
 

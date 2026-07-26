@@ -7,8 +7,8 @@ the records that landed in each turn.
 
 import unittest
 
-from cc_token_tracker.segmentation import segment_turns
 from cc_token_tracker.parser import TranscriptRecord
+from cc_token_tracker.segmentation import segment_turns
 from conftest import prompt, tool_result
 
 

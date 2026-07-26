@@ -9,14 +9,10 @@ here too since pricing is its only consumer.
 import math
 import unittest
 
-from rich.console import Console
-
-from cc_token_tracker import display
 from cc_token_tracker.parser import parse_line
 from cc_token_tracker.pricing import normalize_model, turn_cost_usd
-from cc_token_tracker.reader import ReadResult
 from cc_token_tracker.segmentation import segment_turns
-from cc_token_tracker.turn_cost import turn_costs
+from cc_token_tracker.turn_cost import session_cost, turn_costs, turn_usd
 from conftest import assistant, typed
 
 
@@ -33,6 +29,11 @@ class KnownModels(unittest.TestCase):
         cost = turn_cost_usd("claude-fable-5-20260601",
                              1_000_000, 1_000_000, 1_000_000, 1_000_000)
         self.assertAlmostEqual(cost, 73.50)
+
+    def test_opus_5(self):
+        cost = turn_cost_usd("claude-opus-5",
+                             1_000_000, 1_000_000, 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, 36.75)  # 5 + 25 + 6.25 + 0.50
 
     def test_opus_4_8(self):
         cost = turn_cost_usd("claude-opus-4-8",
@@ -176,173 +177,91 @@ class ModelThreading(unittest.TestCase):
         self.assertIsNone(costs[0].model)
 
 
-class RecentAndSessionCost(unittest.TestCase):
-    """RECENT rows lead with the turn's own dollar cost ("$?" when unpriceable,
-    same rule as the hero COST cell); SESSION TOTAL gains a TOTAL COST row
-    summing per-turn dollars, marked "(+ unpriced)" when a token-bearing turn
-    could not be priced. Structure only."""
+class TurnUsd(unittest.TestCase):
+    """turn_usd prices ONE turn off its own model, reusing the frozen table.
+
+    This is the helper every dollar figure on screen goes through, so the
+    unknown-model None contract is pinned here rather than at a render surface.
+    """
 
     @staticmethod
-    def _text(records, width=80):
-        frame = display.compute_frame(
-            ReadResult(records=records, transcript_path="/x/t.jsonl"))
-        console = Console(width=width)
-        with console.capture() as cap:
-            console.print(display.render_panel(frame))
-        return cap.get()
+    def _only_turn(records):
+        (cost,) = turn_costs(segment_turns(records))
+        return cost
 
-    def test_recent_turn_renders_its_own_cost(self):
-        # haiku turn behind an opus hero: the RECENT row prices with ITS model
-        # ($1.0000 for 1M input on haiku), not the hero's.
-        out = self._text([
-            typed("p1", "old prompt"),
-            assistant("a1", 1_000_000, 0, 0, 0, model="claude-haiku-4-5"),
-            typed("p2", "hero prompt"),
-            assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
+    def test_prices_the_turns_four_components(self):
+        # opus-4-8: (100*5 + 50*25 + 7*6.25 + 3*0.50) / 1e6 = 0.00179525
+        cost = self._only_turn([
+            typed("p1", "go"),
+            assistant("a1", 100, 50, 7, 3, model="claude-opus-4-8"),
         ])
-        self.assertIn("RECENT", out)
-        self.assertIn("$1.0000", out)   # the recent haiku turn's own cost
-        self.assertNotIn("$?", out)     # everything priceable
+        self.assertAlmostEqual(turn_usd(cost), 0.00179525)
 
-    def test_unknown_model_recent_turn_renders_dollar_question(self):
-        # The recent turn has no model -> "$?" in its row, never $0.00. The
-        # hero IS priced, so the only "$?" on screen is the recent row's.
-        out = self._text([
-            typed("p1", "old prompt"),
-            assistant("a1", 100, 50, 0, 0),  # model None: unpriceable
-            typed("p2", "hero prompt"),
-            assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
+    def test_unknown_model_is_none_never_zero(self):
+        # The fixture record leaves model None -> unpriceable. None is the
+        # honest answer the renderer turns into "$?"; 0.0 would be a lie.
+        cost = self._only_turn([typed("p1", "go"), assistant("a1", 100, 50, 7, 3)])
+        self.assertIsNone(turn_usd(cost))
+
+    def test_dated_model_id_still_prices(self):
+        cost = self._only_turn([
+            typed("p1", "go"),
+            assistant("a1", 1_000_000, 0, 0, 0, model="claude-haiku-4-5-20251001"),
         ])
-        self.assertIn("RECENT", out)
-        self.assertIn("$?", out)
-        self.assertNotIn("$0.0000", out)  # unpriceable never renders as zero
+        self.assertAlmostEqual(turn_usd(cost), 1.00)
+
+
+class SessionCostSummation(unittest.TestCase):
+    """session_cost: per-turn dollars summed, with the partial-total flag.
+
+    The single source of truth for a session's money, consumed verbatim by
+    ``summarize_session`` and rendered as the block's ``Total:`` line.
+    """
+
+    @staticmethod
+    def _cost(records):
+        return session_cost(turn_costs(segment_turns(records)))
 
     def test_mixed_model_session_sums_per_turn_costs(self):
-        # haiku 1M input ($1) + opus 1M input ($5) = $6.0000. Aggregate tokens
-        # times a single rate would give $10 (opus) or $2 (haiku) -- the figure
-        # only comes out $6 when each turn is priced with its own model.
-        out = self._text([
+        # haiku 1M input ($1) + opus 1M input ($5) = $6. Aggregate tokens times
+        # a single rate would give $10 (opus) or $2 (haiku) -- the figure only
+        # comes out $6 when each turn is priced with its own model.
+        total, unpriced = self._cost([
             typed("p1", "haiku turn"),
             assistant("a1", 1_000_000, 0, 0, 0, model="claude-haiku-4-5"),
             typed("p2", "opus turn"),
             assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
         ])
-        self.assertIn("TOTAL COST", out)
-        self.assertIn("$6.0000", out)
-        self.assertNotIn("(+ unpriced)", out)
+        self.assertAlmostEqual(total, 6.00)
+        self.assertFalse(unpriced)
 
-    def test_unpriceable_turn_marks_total_partial(self):
-        # One token-bearing turn with no model: the total is the priceable
-        # turns only ($5.0000) and carries the marker -- never a silent
-        # undercount presented as complete.
-        out = self._text([
+    def test_unpriceable_turn_is_excluded_and_flags_the_total_partial(self):
+        # One token-bearing turn with no model: the total covers the priceable
+        # turns only ($5) and carries the flag -- never a silent undercount
+        # presented as complete.
+        total, unpriced = self._cost([
             typed("p1", "mystery turn"),
             assistant("a1", 100, 50, 0, 0),  # model None, tokens > 0
             typed("p2", "opus turn"),
             assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
         ])
-        self.assertIn("TOTAL COST", out)
-        self.assertIn("$5.0000", out)
-        self.assertIn("(+ unpriced)", out)
+        self.assertAlmostEqual(total, 5.00)
+        self.assertTrue(unpriced)
 
-
-class ModelTags(unittest.TestCase):
-    """The RECENT model tag: _model_tag abbreviates every known model to a
-    <=6 char tag, "?" for unknown/absent, and the tag renders between the cost
-    figure and the snippet."""
-
-    @staticmethod
-    def _text(records, width=80):
-        frame = display.compute_frame(
-            ReadResult(records=records, transcript_path="/x/t.jsonl"))
-        console = Console(width=width)
-        with console.capture() as cap:
-            console.print(display.render_panel(frame))
-        return cap.get()
-
-    def test_known_model_tags(self):
-        for model, tag in [
-            ("claude-fable-5", "fab5"),
-            ("claude-opus-4-8", "op4.8"),
-            ("claude-opus-4-7", "op4.7"),
-            ("claude-opus-4-6", "op4.6"),
-            ("claude-opus-4-5", "op4.5"),
-            ("claude-sonnet-4-6", "sn4.6"),
-            ("claude-haiku-4-5", "hk4.5"),
-        ]:
-            self.assertEqual(display._model_tag(model), tag)
-            self.assertLessEqual(len(tag), 6)
-
-    def test_unknown_or_absent_model_tags_question(self):
-        self.assertEqual(display._model_tag(None), "?")
-        self.assertEqual(display._model_tag("gpt-99-turbo"), "?")
-
-    def test_dated_id_tags_via_normalized_form(self):
-        self.assertEqual(display._model_tag("claude-haiku-4-5-20251001"),
-                         "hk4.5")
-
-    def test_recent_row_renders_tag_between_cost_and_snippet(self):
-        out = self._text([
-            typed("p1", "old prompt"),
-            assistant("a1", 1_000_000, 0, 0, 0, model="claude-haiku-4-5"),
-            typed("p2", "hero prompt"),
-            assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
+    def test_zero_token_in_flight_turn_never_flags_unpriced(self):
+        # The just-opened prompt has no usage yet and no model. It costs $0 on
+        # every model, so it must not raise the flag -- otherwise the marker
+        # would flash on screen at the start of every single prompt.
+        total, unpriced = self._cost([
+            typed("p1", "opus turn"),
+            assistant("a1", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
+            typed("p2", "just started"),
         ])
-        line = next(ln for ln in out.splitlines() if "old prompt" in ln)
-        self.assertIn("hk4.5", line)
-        self.assertLess(line.index("$1.0000"), line.index("hk4.5"))
-        self.assertLess(line.index("hk4.5"), line.index("old prompt"))
+        self.assertAlmostEqual(total, 5.00)
+        self.assertFalse(unpriced)
 
-    def test_unknown_model_recent_row_renders_question_tag(self):
-        # The row reads "$?  ?  snippet": the cost cell's "$?" plus the tag's
-        # own standalone "?" on the same line.
-        out = self._text([
-            typed("p1", "old prompt"),
-            assistant("a1", 100, 50, 0, 0),  # model None
-            typed("p2", "hero prompt"),
-            assistant("a2", 1_000_000, 0, 0, 0, model="claude-opus-4-8"),
-        ])
-        line = next(ln for ln in out.splitlines() if "old prompt" in ln)
-        self.assertIn("$?", line)
-        self.assertGreaterEqual(line.count("?"), 2)  # cost "$?" AND tag "?"
-
-
-class RenderCost(unittest.TestCase):
-    """The hero line's COST cell: a dollar figure for a known model, "$?" for
-    an unknown one, token figures unchanged either way. Structure only."""
-
-    @staticmethod
-    def _text(records, width=80):
-        frame = display.compute_frame(
-            ReadResult(records=records, transcript_path="/x/t.jsonl"))
-        console = Console(width=width)
-        with console.capture() as cap:
-            console.print(display.render_panel(frame))
-        return cap.get()
-
-    def test_unknown_model_renders_dollar_question(self):
-        # model defaults to None on the fixture record -> unpriceable -> "$?",
-        # while the token figures render exactly as before.
-        out = self._text([typed("p1", "go"), assistant("a1", 100, 50, 7, 3)])
-        self.assertIn("$?", out)
-        self.assertIn("COST", out)
-        self.assertIn("107", out)  # IN = input + cache_creation, unchanged
-        self.assertIn("50", out)   # OUT unchanged
-
-    def test_known_model_renders_dollar_figure(self):
-        # opus-4-8: (100*5 + 50*25 + 7*6.25 + 3*0.50) / 1e6 = 0.00179525
-        out = self._text([
-            typed("p1", "go"),
-            assistant("a1", 100, 50, 7, 3, model="claude-opus-4-8"),
-        ])
-        self.assertIn("$0.0018", out)
-        self.assertNotIn("$?", out)
-
-    def test_waiting_frame_renders_no_cost_cell(self):
-        # No delta -> no hero figures at all; the COST label must not appear.
-        out = self._text([])
-        self.assertNotIn("COST", out)
-        self.assertIn("waiting for first command", out)
+    def test_no_turns_is_zero_and_unflagged(self):
+        self.assertEqual(session_cost([]), (0.0, False))
 
 
 if __name__ == "__main__":

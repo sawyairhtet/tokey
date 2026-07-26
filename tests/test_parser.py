@@ -1,15 +1,21 @@
-"""Fixture tests for cc_token_tracker.parser (Ticket 1).
+"""Fixture tests for cc_token_tracker.parser.
 
 Each fixture line is an inline string constant defined right next to the
 assertion that exercises it. Fixtures are authoritative: if a fixture and the
 parser disagree, the parser is wrong -- do not edit the fixtures here.
+
+A few tests reach one layer downstream (accounting, pricing) on purpose: the
+parser's type coercions exist precisely to keep malformed transcript values from
+raising there, so the guarantee is only meaningful when checked end to end.
 """
 
 import random
 import string
 import unittest
 
+from cc_token_tracker.accounting import account_usage
 from cc_token_tracker.parser import TranscriptRecord, Usage, parse_line
+from cc_token_tracker.pricing import turn_cost_usd
 
 
 class ValidLines(unittest.TestCase):
@@ -334,6 +340,49 @@ class MalformedScalars(unittest.TestCase):
         rec = parse_line(line)
         self.assertIsNone(rec.cwd)
         self.assertEqual(rec.type, "user")
+
+    def test_unhashable_message_id_is_dropped_not_carried(self):
+        # A non-string message.id must not reach accounting: it becomes a dict
+        # key there, so an unhashable value (list/object) would raise TypeError
+        # mid-pipeline. The field drops to None at the parse boundary instead.
+        line = (
+            '{"type":"assistant","message":{"id":{"nested":1},'
+            '"role":"assistant","stop_reason":"end_turn",'
+            '"usage":{"input_tokens":5,"output_tokens":2}}}'
+        )
+        rec = parse_line(line)
+        self.assertIsNone(rec.message_id)
+        self.assertIsNotNone(rec.usage)  # the usage block still parses
+
+    def test_unhashable_message_id_does_not_break_accounting(self):
+        # The end-to-end guarantee behind the coercion above: the record flows
+        # through accounting without raising, and its tokens are still counted.
+        line = (
+            '{"type":"assistant","message":{"id":["a","b"],'
+            '"role":"assistant","stop_reason":"end_turn",'
+            '"usage":{"input_tokens":5,"output_tokens":2}}}'
+        )
+        result = account_usage([parse_line(line)])
+        self.assertEqual(result.session_total, 7)
+
+    def test_non_string_model_is_dropped_not_carried(self):
+        # model reaches a regex in pricing (normalize_model), which rejects a
+        # non-string with TypeError. Dropped here so pricing sees None instead.
+        line = (
+            '{"type":"assistant","message":{"id":"m1","role":"assistant",'
+            '"model":42,"stop_reason":"end_turn",'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}'
+        )
+        rec = parse_line(line)
+        self.assertIsNone(rec.model)
+        self.assertIsNone(turn_cost_usd(rec.model, 1, 1, 0, 0))  # no raise
+
+    def test_non_string_stop_reason_is_dropped(self):
+        line = (
+            '{"type":"assistant","message":{"id":"m1","role":"assistant",'
+            '"stop_reason":7,"usage":{"input_tokens":1,"output_tokens":1}}}'
+        )
+        self.assertIsNone(parse_line(line).stop_reason)
 
 
 class NeverRaises(unittest.TestCase):

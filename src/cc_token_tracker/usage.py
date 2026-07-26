@@ -37,25 +37,27 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 __all__ = [
-    "USAGE_ENV_VAR",
-    "USAGE_ENDPOINT",
     "DEFAULT_CREDENTIALS_PATH",
-    "MACOS_KEYCHAIN_SERVICE",
     "FETCH_TIMEOUT_SECONDS",
-    "UsageWindow",
-    "Credits",
+    "MACOS_KEYCHAIN_SERVICE",
+    "USAGE_ENDPOINT",
+    "USAGE_ENV_VAR",
     "AccountUsage",
     "Credentials",
-    "usage_enabled",
-    "read_credentials",
-    "read_macos_keychain",
+    "Credits",
+    "UsageProvider",
+    "UsageWindow",
     "fetch_usage_blob",
     "parse_usage",
-    "UsageProvider",
+    "read_credentials",
+    "read_macos_keychain",
+    "usage_enabled",
 ]
 
 # The single opt-in switch. Off unless this is set to a truthy value; when unset
@@ -81,6 +83,14 @@ MACOS_KEYCHAIN_SERVICE = "Claude Code-credentials"
 FETCH_TIMEOUT_SECONDS = 6.0
 
 _TRUTHY = {"1", "true", "yes", "on"}
+
+# The injectable seams. Each names a real collaborator so a test can hand in a
+# fake without a mock patch, and so the signature says what it expects.
+KeychainReader = Callable[[], str | None]
+CredentialsReader = Callable[[], "Credentials | None"]
+UsageFetcher = Callable[..., "dict | None"]
+SubprocessRunner = Callable[..., Any]
+UrlOpener = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -181,7 +191,7 @@ def _credentials_from_blob(blob: object) -> Credentials | None:
 def read_macos_keychain(
     service: str = MACOS_KEYCHAIN_SERVICE,
     *,
-    runner=subprocess.run,
+    runner: SubprocessRunner = subprocess.run,
     platform: str | None = None,
 ) -> str | None:
     """Return the raw credentials JSON from the macOS login Keychain, or None.
@@ -216,7 +226,7 @@ def read_macos_keychain(
 def read_credentials(
     path: str | None = None,
     *,
-    keychain_reader=read_macos_keychain,
+    keychain_reader: KeychainReader = read_macos_keychain,
 ) -> Credentials | None:
     """Read the OAuth token and plan from Claude Code's credential store. Never
     raises.
@@ -232,7 +242,7 @@ def read_credentials(
     if path is None:
         path = DEFAULT_CREDENTIALS_PATH
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             creds = _credentials_from_blob(json.load(handle))
     except (OSError, ValueError):
         creds = None
@@ -250,7 +260,7 @@ def read_credentials(
 def fetch_usage_blob(
     token: str,
     *,
-    opener=urllib.request.urlopen,
+    opener: UrlOpener = urllib.request.urlopen,
     timeout: float = FETCH_TIMEOUT_SECONDS,
 ) -> dict | None:
     """GET the usage endpoint with the OAuth token. Returns the JSON, or None.
@@ -367,8 +377,8 @@ class UsageProvider:
         self,
         *,
         enabled: bool,
-        creds_reader=read_credentials,
-        fetcher=fetch_usage_blob,
+        creds_reader: CredentialsReader = read_credentials,
+        fetcher: UsageFetcher = fetch_usage_blob,
         timeout: float = FETCH_TIMEOUT_SECONDS,
     ) -> None:
         self.enabled = enabled

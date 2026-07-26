@@ -2,8 +2,8 @@
 
 The marker store is the roster's liveness source of truth. These tests pin the
 atomic write, the keyed read, the open->closed tombstone overwrite, never-raise
-tolerance of garbage, dir self-creation, and the closed-tombstone TTL cleanup.
-A temp markers dir is injected so nothing touches the real store.
+tolerance of garbage, dir self-creation, and the TTL cleanup that keeps the
+store bounded. A temp markers dir is injected so nothing touches the real store.
 """
 
 import json
@@ -13,11 +13,14 @@ import unittest
 
 from cc_token_tracker.markers import (
     CLOSED,
+    MARKER_STALE_AFTER_SECONDS,
+    MARKER_TTL_SECONDS,
     OPEN,
     MarkerInfo,
     read_markers,
     write_marker,
 )
+from cc_token_tracker.sessions import DEFAULT_WINDOW_DAYS
 
 NOW = 1_780_000_000.0
 
@@ -97,6 +100,25 @@ class WriteAndRead(unittest.TestCase):
         markers = read_markers(self.dir, now=NOW)
         self.assertEqual(markers["/p/a.jsonl"].event, CLOSED)
 
+    def test_old_open_marker_is_pruned_too(self):
+        # A session killed hard leaves an OPEN marker with no tombstone behind
+        # it. Liveness already treats it as dropped after two hours, but the
+        # FILE also has to go or the store grows without bound for the life of
+        # the install: once past the TTL it is unlinked like any other marker.
+        write_marker("sid-crashed", "/p/a.jsonl", "/p", OPEN,
+                     markers_dir=self.dir, now=NOW - 8 * 86400.0)
+        self.assertEqual(read_markers(self.dir, now=NOW), {})
+        self.assertEqual(
+            [n for n in os.listdir(self.dir) if n.endswith(".json")], []
+        )
+
+    def test_open_marker_inside_the_ttl_is_kept(self):
+        # The boundary the pruning must not cross: a long-lived but in-window
+        # open session keeps its marker and stays matchable by the roster.
+        write_marker("sid-1", "/p/a.jsonl", "/p", OPEN,
+                     markers_dir=self.dir, now=NOW - 6 * 86400.0)
+        self.assertEqual(read_markers(self.dir, now=NOW)["/p/a.jsonl"].event, OPEN)
+
     def test_session_id_with_separators_is_sanitized(self):
         ok = write_marker("../../evil", "/p/a.jsonl", "/p", OPEN,
                           markers_dir=self.dir, now=NOW)
@@ -104,6 +126,21 @@ class WriteAndRead(unittest.TestCase):
         # The file landed inside the markers dir, not via the traversal.
         names = os.listdir(self.dir)
         self.assertEqual(names, ["evil.json"])
+
+
+class TtlMatchesDiscoveryWindow(unittest.TestCase):
+    """The marker TTL and the roster's discovery window are the same 7 days,
+    stated in two modules (markers cannot import sessions without a cycle).
+    This pins the coupling so the two cannot silently drift apart."""
+
+    def test_ttl_equals_the_discovery_window(self):
+        self.assertEqual(MARKER_TTL_SECONDS, DEFAULT_WINDOW_DAYS * 86400.0)
+
+    def test_ttl_is_far_longer_than_the_crash_bound(self):
+        # The crash bound decides the LABEL (dropped) in hours; the TTL decides
+        # when the file is deleted, days later. Inverting them would delete
+        # markers the roster still classifies from.
+        self.assertGreater(MARKER_TTL_SECONDS, MARKER_STALE_AFTER_SECONDS)
 
 
 if __name__ == "__main__":

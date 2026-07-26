@@ -238,7 +238,7 @@ class SummarizeSession(SessionsBase):
     def test_zero_token_in_flight_turn_does_not_set_unpriced(self):
         # A trailing typed prompt with no assistant usage yet: same exception
         # as the panel's session total (no flag flash on every new prompt).
-        lines = turn("m1", OPUS) + [PROMPT]
+        lines = [*turn("m1", OPUS), PROMPT]
         path = self.write_transcript("proj-a", "s1.jsonl", lines)
 
         summary = summarize_session(path)
@@ -264,7 +264,7 @@ class SummarizeSession(SessionsBase):
                 },
             },
         })
-        lines = turn("m1", OPUS) + [PROMPT, last]
+        lines = [*turn("m1", OPUS), PROMPT, last]
         path = self.write_transcript("proj-a", "s1.jsonl", lines)
 
         summary = summarize_session(path)
@@ -503,7 +503,8 @@ class RealTimeLast(SessionsBase):
     def test_in_flight_turn_drives_last_figures(self):
         # A completed turn, then an in-flight one (no end_turn) carrying usage.
         # Last must reflect the in-flight turn so it updates live mid-prompt.
-        lines = turn("m1", OPUS, input_tokens=1000, output_tokens=1000) + [
+        lines = [
+            *turn("m1", OPUS, input_tokens=1000, output_tokens=1000),
             PROMPT,
             usage_assistant("m2", input_tokens=2000, output_tokens=400,
                             stop_reason="tool_use"),
@@ -519,7 +520,7 @@ class RealTimeLast(SessionsBase):
     def test_typed_prompt_tail_falls_back_to_last_completed(self):
         # The idle tail (a typed prompt with no usage) must NOT blank Last with
         # zeros; it falls back to the last completed turn.
-        lines = turn("m1", OPUS, input_tokens=1000, output_tokens=1000) + [PROMPT]
+        lines = [*turn("m1", OPUS, input_tokens=1000, output_tokens=1000), PROMPT]
         path = self.write_transcript("proj-a", "s1.jsonl", lines)
 
         summary = summarize_session(path)

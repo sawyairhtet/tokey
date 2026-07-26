@@ -7,8 +7,8 @@ is injected so nothing touches the real store.
 """
 
 import io
-import os
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock

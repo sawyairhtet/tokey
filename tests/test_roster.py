@@ -12,25 +12,30 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
+from rich.cells import cell_len
 from rich.console import Console
 
-from cc_token_tracker import __version__
+from cc_token_tracker import __version__, roster
 from cc_token_tracker.roster import (
     ROSTER_LIMIT,
+    _bar,
     _context_model_label,
+    _credits_row,
     _k,
     _project_title,
+    _reset_text,
     account_usage_requested,
     build_roster_view,
     main,
     percent_figure,
     render_roster,
+    run,
     version_requested,
 )
-from cc_token_tracker.usage import USAGE_ENV_VAR
 from cc_token_tracker.sessions import SessionCache, SessionSummary
-from cc_token_tracker.usage import AccountUsage, Credits, UsageWindow
+from cc_token_tracker.usage import USAGE_ENV_VAR, AccountUsage, Credits, UsageWindow
 
 NOW = 1_780_000_000.0
 
@@ -97,6 +102,94 @@ class FigureHelpers(unittest.TestCase):
         self.assertEqual(_context_model_label(""), "")
         # A non-claude id is left as-is (after date normalization).
         self.assertEqual(_context_model_label("some-model"), "some-model")
+
+
+class BarGauge(unittest.TestCase):
+    """The one bar helper behind both the context gauge and the account rows.
+
+    It is the only place a percent becomes a number of lit cells, so the
+    clamping and rounding are pinned here rather than at each call site.
+    """
+
+    @staticmethod
+    def _lit(percent, width=10):
+        """Cells in the coloured (filled) run. The bar is one solid string whose
+        UNLIT tail carries the dim-grey span, so the lit run is what precedes
+        it, and a bar with no grey span at all is completely full."""
+        bar = _bar(percent, width, "yellow")
+        return bar.spans[0].start if bar.spans else width
+
+    def test_width_is_constant_whatever_the_percent(self):
+        for percent in (-50.0, 0.0, 33.3, 99.9, 100.0, 250.0):
+            self.assertEqual(cell_len(_bar(percent, 20, "yellow").plain), 20)
+
+    def test_fill_tracks_the_percent(self):
+        self.assertEqual(self._lit(0.0), 0)
+        self.assertEqual(self._lit(50.0), 5)
+        self.assertEqual(self._lit(100.0), 10)
+
+    def test_overflow_clamps_to_full_never_wider(self):
+        # A context estimate can exceed 100% (the panel marks it "104%?"); the
+        # bar must saturate rather than render past its own width.
+        self.assertEqual(cell_len(_bar(250.0, 10, "yellow").plain), 10)
+        self.assertEqual(self._lit(250.0), 10)
+
+    def test_negative_clamps_to_empty(self):
+        self.assertEqual(self._lit(-5.0), 0)
+
+
+class ResetText(unittest.TestCase):
+    """The account rows' reset phrasing, which mirrors the Claude Usage panel."""
+
+    def test_under_a_day_counts_down(self):
+        self.assertEqual(_reset_text(NOW + 4 * 3600 + 52 * 60, NOW), "resets in 4h 52m")
+
+    def test_minutes_are_zero_padded(self):
+        self.assertEqual(_reset_text(NOW + 3 * 3600 + 5 * 60, NOW), "resets in 3h 05m")
+
+    def test_a_day_or_more_names_the_weekday(self):
+        text = _reset_text(NOW + 4 * 86400, NOW)
+        self.assertTrue(text.startswith("resets "))
+        self.assertNotIn("resets in", text)  # absolute, not a countdown
+
+    def test_absent_or_past_reset_renders_nothing(self):
+        # Never show a stale or negative countdown: the row just omits it.
+        self.assertEqual(_reset_text(None, NOW), "")
+        self.assertEqual(_reset_text(NOW - 60, NOW), "")
+        self.assertEqual(_reset_text(NOW, NOW), "")
+
+
+class CreditsRow(unittest.TestCase):
+    """Usage credits are the ONE place real dollars belong; the percent falls
+    back to used/limit when the endpoint leaves utilization null."""
+
+    @staticmethod
+    def _cells(credits):
+        return [cell.plain for cell in _credits_row(credits)]
+
+    def test_reported_utilization_wins(self):
+        cells = self._cells(Credits(enabled=True, used=1.0, limit=10.0,
+                                    utilization=42.0, currency="USD"))
+        self.assertIn("42%", cells)
+        self.assertIn("($1.00 / $10.00)", cells)
+
+    def test_null_utilization_falls_back_to_used_over_limit(self):
+        cells = self._cells(Credits(enabled=True, used=2.5, limit=10.0,
+                                    utilization=None, currency="USD"))
+        self.assertIn("25%", cells)
+
+    def test_null_utilization_and_no_limit_is_zero_not_a_crash(self):
+        # No limit means nothing to divide by: 0% and a bare spend figure,
+        # never a ZeroDivisionError on the render path.
+        cells = self._cells(Credits(enabled=True, used=3.0, limit=None,
+                                    utilization=None, currency="USD"))
+        self.assertIn("0%", cells)
+        self.assertIn("($3.00)", cells)
+
+    def test_non_usd_currency_is_named_not_dollar_signed(self):
+        cells = self._cells(Credits(enabled=True, used=1.0, limit=5.0,
+                                    utilization=20.0, currency="eur"))
+        self.assertIn("(1.00 / 5.00 EUR)", cells)
 
 
 class Header(unittest.TestCase):
@@ -310,7 +403,7 @@ class FooterAndCaps(unittest.TestCase):
         dropped = make_summary(project="proj-dropped", file_name="dropped.jsonl",
                                last_write=NOW - 800,
                                total_tokens=50_000, total_cost_usd=0.5)
-        summaries = fresh + [dropped]
+        summaries = [*fresh, dropped]
 
         # Roster scope: the dropped session leaves; 11 remain, 10 shown.
         view = build_roster_view(summaries, now=NOW)
@@ -514,6 +607,41 @@ class AccountUsageBlock(unittest.TestCase):
         )
         (line,) = line_with(text, "Weekly (Opus)")
         self.assertIn("40%", line)
+
+
+class RunLoop(unittest.TestCase):
+    """The poll loop: a bad tick is survivable, Ctrl-C is not a crash.
+
+    The real loop is infinite, so each test drives it through a stubbed
+    SessionCache.summaries that raises to end the run. stdout is swallowed so
+    the Live control codes stay out of the test output.
+    """
+
+    @staticmethod
+    def _run(side_effect, **kwargs):
+        with mock.patch.object(
+            roster.SessionCache, "summaries", side_effect=side_effect
+        ), contextlib.redirect_stdout(io.StringIO()):
+            return run(interval=0, **kwargs)
+
+    def test_keyboard_interrupt_exits_zero(self):
+        self.assertEqual(self._run(KeyboardInterrupt), 0)
+
+    def test_one_failing_tick_is_logged_and_the_loop_continues(self):
+        # The load-bearing promise: a single bad read (a transcript truncated
+        # mid-write, a transient stat failure) must not end a long-running
+        # panel. The second tick still happens; only Ctrl-C stops it.
+        ticks = [RuntimeError("bad tick"), KeyboardInterrupt]
+        with self.assertLogs("cc_token_tracker.roster", level="ERROR") as logged:
+            self.assertEqual(self._run(ticks), 0)
+        self.assertIn("roster tick failed", logged.output[0])
+
+    def test_account_usage_off_never_touches_credentials_or_network(self):
+        # The opt-in promise: with the feature off, no refresh thread is
+        # started, so neither the credential store nor the endpoint is read.
+        with mock.patch.object(roster.UsageProvider, "refresh") as refresh:
+            self._run(KeyboardInterrupt, account_usage=False)
+        refresh.assert_not_called()
 
 
 class VersionFlag(unittest.TestCase):

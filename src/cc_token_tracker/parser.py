@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-__all__ = ["Usage", "TranscriptRecord", "parse_line"]
+__all__ = ["TranscriptRecord", "Usage", "parse_line"]
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,9 @@ class TranscriptRecord:
     is_tool_result: bool = False
     # Verbatim ``message.content`` when it is a plain string (a typed user
     # prompt); ``None`` when content is a block list (tool_use/tool_result/etc).
-    # Stored raw -- no whitespace collapse or truncation here; that is display's
-    # job. Carried so a turn's opening record holds the text downstream needs.
+    # Stored raw -- no whitespace collapse or truncation here; that is the
+    # renderer's job. Carried so a turn's opening record holds the text
+    # downstream needs.
     text: str | None = None
     # Verbatim ``message.model`` (the model string as the transcript JSONL
     # carries it); ``None`` when absent. Held, not interpreted -- pricing
@@ -57,6 +58,19 @@ class TranscriptRecord:
     # when absent. The roster decodes this into a readable ``~``-relative title,
     # since the project-dir name on disk is a lossy dash-encoding of this path.
     cwd: str | None = None
+
+
+def _str_or_none(value: object) -> str | None:
+    """Keep a field only when it is a real string, else ``None``.
+
+    Guards the ``str | None`` annotations against a malformed transcript. This
+    is not cosmetic: ``message_id`` becomes a dict key in accounting, so an
+    unhashable value (a list or object where an id belongs) would raise
+    ``TypeError`` deep in the pipeline, and ``model`` reaches a regex in
+    pricing, which rejects a non-string the same way. Dropping the field
+    instead keeps every downstream layer on its documented never-raises path.
+    """
+    return value if isinstance(value, str) else None
 
 
 def _int_or_none(value: object) -> int | None:
@@ -128,17 +142,16 @@ def parse_line(line: str) -> TranscriptRecord | None:
     if not isinstance(message, dict):
         message = {}
 
-    content = message.get("content")
     return TranscriptRecord(
         type=type_val,
-        message_id=message.get("id"),
-        role=message.get("role"),
+        message_id=_str_or_none(message.get("id")),
+        role=_str_or_none(message.get("role")),
         usage=_parse_usage(message.get("usage")),
-        stop_reason=message.get("stop_reason"),
+        stop_reason=_str_or_none(message.get("stop_reason")),
         is_meta=bool(obj.get("isMeta", False)),
         is_sidechain=bool(obj.get("isSidechain", False)),
         is_tool_result=_is_tool_result(type_val, message),
-        text=content if isinstance(content, str) else None,
-        model=message.get("model"),
-        cwd=obj.get("cwd") if isinstance(obj.get("cwd"), str) else None,
+        text=_str_or_none(message.get("content")),
+        model=_str_or_none(message.get("model")),
+        cwd=_str_or_none(obj.get("cwd")),
     )

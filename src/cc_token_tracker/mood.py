@@ -28,9 +28,25 @@ from rich.text import Text
 from cc_token_tracker.liveness import ACTIVE
 from cc_token_tracker.sessions import SessionSummary
 
+__all__ = [
+    "ACTIVE_WRITE_WINDOW",
+    "BAYMAX_BLUE",
+    "BUBBLE_COLOR",
+    "FACES",
+    "FACE_COLOR",
+    "MOODS",
+    "ROTATE_SECONDS",
+    "accent",
+    "current_index",
+    "face_text",
+    "is_working",
+    "pick",
+    "render_bubble",
+    "render_mood",
+]
+
 # Baymax wears a soft light blue so he has some life against the white bubble
-# (pure white on white read as flat). CLAUDE_CORAL is kept for reference.
-CLAUDE_CORAL = "#D97757"
+# (pure white on white read as flat).
 BAYMAX_BLUE = "#8ECAE6"
 FACE_COLOR = BAYMAX_BLUE
 BUBBLE_COLOR = "white"
@@ -63,8 +79,8 @@ def _baymax(faceline: str) -> str:
     return "\n".join((top, "( " + centered + " )", bottom))
 
 
-# Baymax in coral: every mood is the same soft head, emoting only through the
-# eyes, exactly like the real thing. Each phrase below maps to one of these.
+# Every mood is the same soft head, emoting only through the eyes, exactly like
+# the real thing. Each phrase below maps to one of these.
 FACES: dict[str, str] = {
     "happy": _baymax("◠" + _LINE + "◠"),
     "cool": _baymax("■" + _LINE + "■"),
@@ -140,8 +156,9 @@ def is_working(active: list[SessionSummary], now: float) -> bool:
     state check is defensive in case a wider list is ever passed.
     """
     return any(
-        s.state == ACTIVE and (now - s.last_write) < ACTIVE_WRITE_WINDOW
-        for s in active
+        summary.state == ACTIVE
+        and (now - summary.last_write) < ACTIVE_WRITE_WINDOW
+        for summary in active
     )
 
 
@@ -172,23 +189,24 @@ def render_bubble(phrase: str, width: int, color: str = BUBBLE_COLOR) -> Text:
     Rounded corners with curved ``( )`` sides read as a balloon rather than a
     box; the bottom border carries a tail notch near the right, pointing down at
     the face parked beneath it. Long lines wrap to a readable width and the
-    bubble grows as tall as needed.
+    bubble grows as tall as needed. Every row is exactly ``inner + 4`` cells, so
+    the borders line up whatever the phrase; a phrase too short to fill the
+    narrowest well-formed bubble is floored rather than rendered ragged.
     """
-    maxw = max(12, min(56, width - 8))
-    lines = textwrap.wrap(phrase, width=maxw) or [phrase]
-    inner = max(cell_len(line) for line in lines)
+    wrap_width = max(12, min(56, width - 8))
+    lines = textwrap.wrap(phrase, width=wrap_width) or [phrase]
+    # Floor at 2: the bottom border spends 3 of its cells on the corners and the
+    # tail notch, so a 1-cell inner width cannot be balanced against the top.
+    inner = max(2, max(cell_len(line) for line in lines))
     top = "╭" + "─" * (inner + 2) + "╮"
-    mids = [
-        "( " + line + " " * (inner - cell_len(line)) + " )" for line in lines
-    ]
-    left_dashes = max(1, inner - 1)
-    bottom = "╰" + "─" * left_dashes + "┬" + "─" * 2 + "╯"
+    mids = ["( " + line + " " * (inner - cell_len(line)) + " )" for line in lines]
+    bottom = "╰" + "─" * (inner - 1) + "┬" + "──" + "╯"
     return Text("\n".join((top, *mids, bottom)), style=f"bold {color}")
 
 
 def face_text(working: bool, now: float) -> Text:
-    """The big coral four-row face for this tick. While working, a spinner is
-    tucked onto the bottom border so there is still live motion."""
+    """The big light-blue three-row face for this tick. While working, a spinner
+    is tucked onto the bottom border so there is still live motion."""
     block = FACES[pick(now)[0]]
     if working:
         lines = block.split("\n")
@@ -202,31 +220,14 @@ def render_mood(
     now: float | None = None,
     width: int = 80,
 ) -> Group:
-    """Right-parked bubble stacked over the big face: the standalone mood render
-    (used by the harness and tests). The footer composes the same pieces; see
-    :func:`cc_token_tracker.roster._footer`.
+    """Right-parked bubble stacked over the big face: the whole mood stack.
+
+    The one place that composition lives. :func:`cc_token_tracker.roster._footer`
+    calls this and adds the totals line beneath it; the preview harness and the
+    tests call it directly.
     """
     if now is None:
         now = time.time()
     working = is_working(active, now)
     bubble = render_bubble(pick(now)[1], width)
     return Group(Align.right(bubble), Align.right(face_text(working, now)))
-
-
-__all__ = [
-    "ACTIVE_WRITE_WINDOW",
-    "BAYMAX_BLUE",
-    "BUBBLE_COLOR",
-    "CLAUDE_CORAL",
-    "FACE_COLOR",
-    "FACES",
-    "MOODS",
-    "ROTATE_SECONDS",
-    "accent",
-    "current_index",
-    "face_text",
-    "is_working",
-    "pick",
-    "render_bubble",
-    "render_mood",
-]

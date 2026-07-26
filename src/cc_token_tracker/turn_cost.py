@@ -1,10 +1,13 @@
-"""Per-turn cost: compose accounting over each turn.
+"""Per-turn cost: compose accounting over each turn, then price it.
 
 Pure logic, no IO. ``segment_turns`` groups records into turns; ``account_usage``
 dedupes cost over records. This module runs ``account_usage`` over each turn's
-records to produce the headline per-command number, one ``TurnCost`` per turn.
+records to produce the headline per-command number, one ``TurnCost`` per turn,
+and owns the two dollar helpers every render surface shares: :func:`turn_usd`
+for one turn and :func:`session_cost` for a whole session.
 
-Accounting is reused as-is -- this module does not reimplement dedup or summing.
+Accounting is reused as-is -- this module does not reimplement dedup or summing,
+and pricing is the frozen :func:`cc_token_tracker.pricing.turn_cost_usd` table.
 """
 
 from __future__ import annotations
@@ -13,9 +16,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from cc_token_tracker.accounting import SessionAccounting, account_usage
+from cc_token_tracker.pricing import turn_cost_usd
 from cc_token_tracker.segmentation import Turn
 
-__all__ = ["TurnCost", "turn_costs"]
+__all__ = ["TurnCost", "session_cost", "turn_costs", "turn_usd"]
 
 
 @dataclass(frozen=True)
@@ -70,7 +74,9 @@ def turn_costs(turns: Iterable[Turn]) -> list[TurnCost]:
             TurnCost(
                 complete=turn.complete,
                 input_tokens=accounting.total_input_tokens,
-                cache_creation_input_tokens=accounting.total_cache_creation_input_tokens,
+                cache_creation_input_tokens=(
+                    accounting.total_cache_creation_input_tokens
+                ),
                 cache_read_input_tokens=accounting.total_cache_read_input_tokens,
                 output_tokens=accounting.total_output_tokens,
                 turn_total=accounting.session_total,
@@ -79,3 +85,45 @@ def turn_costs(turns: Iterable[Turn]) -> list[TurnCost]:
             )
         )
     return results
+
+
+def turn_usd(cost: TurnCost) -> float | None:
+    """One turn's dollar cost via the frozen pricing table, or None.
+
+    Pricing is :func:`cc_token_tracker.pricing.turn_cost_usd` over the SAME four
+    component counts the turn already carries -- nothing is recomputed here. No
+    ``costUSD`` is passed: parsed records do not carry one today, so the table
+    compute applies (``turn_cost_usd`` accepts one for when a caller has it).
+    None means the turn's model is unknown or absent; the caller renders that
+    honestly (``$?``), never as $0.00.
+    """
+    return turn_cost_usd(
+        cost.model,
+        cost.input_tokens,
+        cost.output_tokens,
+        cost.cache_creation_input_tokens,
+        cost.cache_read_input_tokens,
+    )
+
+
+def session_cost(costs: Iterable[TurnCost]) -> tuple[float, bool]:
+    """(sum of per-turn dollar costs, whether any turn went unpriced).
+
+    The single source of truth for a session's dollar total. Each turn is priced
+    individually with its OWN model, then the dollars are summed -- never
+    aggregate tokens times a single rate, since a session can mix models. A turn
+    that cannot be priced is left out of the sum and flips the unpriced flag so
+    the renderer can mark the total as partial. EXCEPTION: a zero-token
+    unpriceable turn (the just-opened in-flight prompt before any usage lands)
+    contributes $0 exactly on any model, so it neither shifts the sum nor raises
+    the flag -- otherwise the marker would flash on every new prompt.
+    """
+    total = 0.0
+    unpriced = False
+    for cost in costs:
+        usd = turn_usd(cost)
+        if usd is not None:
+            total += usd
+        elif cost.turn_total:
+            unpriced = True
+    return total, unpriced

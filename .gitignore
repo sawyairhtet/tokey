@@ -13,6 +13,11 @@ venv/
 
 # Test/tooling caches
 .pytest_cache/
+.ruff_cache/
+
+# Generated knowledge-graph output (regenerate with /graphify; carries its own
+# hash-keyed cache, so it is build output, not source)
+graphify-out/
 
 # Local render harnesses (cosmetic-art preview tooling)
 .doge_harness/
@@ -20,6 +25,9 @@ venv/
 
 # OS cruft
 .DS_Store
+
+# Editor config
+.vscode/
 
 # Local Claude Code config
 .claude/
